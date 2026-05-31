@@ -76,6 +76,12 @@ export async function update(id, data) {
     'field_mapping',
     'plan',
     'active',
+    'auth_id',
+    'refresh_id',
+    'server_endpoint',
+    'application_token',
+    'member_id',
+    'auth_expires_at',
   ];
 
   const setClauses = [];
