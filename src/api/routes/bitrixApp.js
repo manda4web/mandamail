@@ -872,17 +872,48 @@ function buildAppHtml() {
 
     // ===== BOOT =====
     document.addEventListener('DOMContentLoaded', function() {
-      if (getToken()) {
-        showApp();
-      } else {
-        showLogin();
+      // Try Bitrix24 auto-auth first
+      try {
+        BX24.init(function() {
+          BX24.fitWindow();
+          var auth = BX24.getAuth();
+          if (auth && auth.domain) {
+            // Auto-authenticate via Bitrix24
+            fetch('/auth/bitrix', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                domain: auth.domain,
+                member_id: auth.member_id,
+                auth_id: auth.access_token
+              })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data.token) {
+                setToken(data.token);
+                if (data.tenant_id) currentTenantId = data.tenant_id;
+                showApp();
+              } else {
+                showLogin();
+              }
+            })
+            .catch(function() { showLogin(); });
+          } else if (getToken()) {
+            showApp();
+          } else {
+            showLogin();
+          }
+        });
+      } catch(e) {
+        // BX24 not available (direct access outside Bitrix24)
+        if (getToken()) {
+          showApp();
+        } else {
+          showLogin();
+        }
       }
     });
-
-    // Bitrix24 SDK init
-    try {
-      BX24.init(function() { BX24.fitWindow(); });
-    } catch(e) {}
   </script>
 </body>
 </html>`;
