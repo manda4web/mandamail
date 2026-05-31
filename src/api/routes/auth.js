@@ -59,11 +59,15 @@ export default async function authRoutes(fastify) {
           domain: { type: 'string', minLength: 1 },
           member_id: { type: 'string', minLength: 1 },
           auth_id: { type: 'string' },
+          refresh_id: { type: 'string' },
+          server_endpoint: { type: 'string' },
+          application_token: { type: 'string' },
+          auth_expires: { type: 'string' },
         },
       },
     },
   }, async (request, reply) => {
-    const { domain, member_id, auth_id } = request.body;
+    const { domain, member_id, auth_id, refresh_id, server_endpoint, application_token, auth_expires } = request.body;
 
     const bitrixUrl = 'https://' + domain;
 
@@ -74,9 +78,23 @@ export default async function authRoutes(fastify) {
       tenant = await TenantRepo.create({
         name: domain,
         bitrix_url: bitrixUrl,
-        bitrix_webhook_token: 'pending-configuration',
-        bitrix_responsible_id: 1,
+        bitrix_webhook_token: null,
+        bitrix_responsible_id: null,
+        member_id: member_id,
       });
+    }
+
+    // Update OAuth tokens if provided
+    if (auth_id) {
+      const oauthData = { auth_id, member_id };
+      if (refresh_id) oauthData.refresh_id = refresh_id;
+      if (server_endpoint) oauthData.server_endpoint = server_endpoint;
+      if (application_token) oauthData.application_token = application_token;
+      if (auth_expires) {
+        oauthData.auth_expires_at = new Date(Date.now() + parseInt(auth_expires) * 1000);
+      }
+      await TenantRepo.update(tenant.id, oauthData);
+      logger.info({ tenant_id: tenant.id, domain }, 'OAuth tokens updated');
     }
 
     // Find or create user for this portal member

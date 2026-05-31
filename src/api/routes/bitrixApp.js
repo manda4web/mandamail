@@ -46,6 +46,10 @@ function extractBitrixData(query, body) {
     domain: q.DOMAIN || q.domain || b.DOMAIN || b.domain || '',
     member_id: b.member_id || q.member_id || b.MEMBER_ID || '',
     auth_id: b.AUTH_ID || b.auth_id || q.AUTH_ID || '',
+    refresh_id: b.REFRESH_ID || b.refresh_id || '',
+    server_endpoint: b.SERVER_ENDPOINT || b.server_endpoint || '',
+    application_token: b.APPLICATION_TOKEN || b.application_token || '',
+    auth_expires: b.AUTH_EXPIRES || b.auth_expires || '',
   };
 }
 
@@ -100,6 +104,10 @@ function buildAppHtml(data) {
     domain: data.domain,
     member_id: data.member_id,
     auth_id: data.auth_id,
+    refresh_id: data.refresh_id,
+    server_endpoint: data.server_endpoint,
+    application_token: data.application_token,
+    auth_expires: data.auth_expires,
   });
 
   const parts = [];
@@ -1071,7 +1079,7 @@ function getAppJsBoot() {
     '    fetch("/auth/bitrix", {',
     '      method: "POST",',
     '      headers: { "Content-Type": "application/json" },',
-    '      body: JSON.stringify({ domain: domain, member_id: memberId || "user", auth_id: bitrixData.auth_id || "" })',
+    '      body: JSON.stringify({ domain: domain, member_id: memberId || "user", auth_id: bitrixData.auth_id || "", refresh_id: bitrixData.refresh_id || "", server_endpoint: bitrixData.server_endpoint || "", application_token: bitrixData.application_token || "", auth_expires: bitrixData.auth_expires || "" })',
     '    })',
     '    .then(function(r) { return r.json(); })',
     '    .then(function(data) {',

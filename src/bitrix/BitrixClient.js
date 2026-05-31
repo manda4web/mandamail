@@ -42,12 +42,17 @@ export function isTransientError(statusCode) {
 export class BitrixClient {
   /**
    * @param {Object} tenant - Tenant configuration object
-   * @param {string} tenant.bitrix_url - Bitrix24 webhook base URL
-   * @param {string} tenant.bitrix_webhook_token - Webhook token
+   * @param {string} tenant.bitrix_url - Bitrix24 base URL
+   * @param {string} [tenant.bitrix_webhook_token] - Webhook token (legacy)
+   * @param {string} [tenant.auth_id] - OAuth access token
+   * @param {string} [tenant.server_endpoint] - OAuth server endpoint
    */
   constructor(tenant) {
+    this.tenant = tenant;
     this.baseUrl = tenant.bitrix_url.replace(/\/$/, '');
     this.token = tenant.bitrix_webhook_token;
+    this.authId = tenant.auth_id;
+    this.serverEndpoint = tenant.server_endpoint;
     this.maxAttempts = 3;
     this.retryDelay = 2000; // 2 seconds
     this.timeout = 30000; // 30 seconds
@@ -55,13 +60,28 @@ export class BitrixClient {
 
   /**
    * Makes an API call with internal retry (3 attempts, 2s delay).
+   * Supports both OAuth (auth_id) and webhook (token) modes.
    * @param {string} method - Bitrix24 REST method (e.g., 'crm.deal.add')
    * @param {Object} params - Method parameters
    * @returns {Promise<Object>} API response result
    * @throws {BitrixError} After 3 failed attempts or on non-transient error
    */
   async call(method, params = {}) {
-    const url = `${this.baseUrl}/${this.token}/${method}`;
+    let url;
+    let body = params;
+
+    if (this.authId) {
+      // OAuth mode: use server_endpoint or construct from domain
+      const endpoint = this.serverEndpoint || (this.baseUrl + '/rest');
+      url = `${endpoint}/${method}`;
+      body = { ...params, auth: this.authId };
+    } else if (this.token) {
+      // Webhook mode (legacy)
+      url = `${this.baseUrl}/${this.token}/${method}`;
+    } else {
+      throw new BitrixError('No authentication configured (neither OAuth nor webhook)', { type: 'non-transient', statusCode: 0, attempts: 0 });
+    }
+
     let lastError;
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
@@ -72,7 +92,7 @@ export class BitrixClient {
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(params),
+          body: JSON.stringify(body),
           signal: controller.signal,
         });
 
