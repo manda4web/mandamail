@@ -5,15 +5,16 @@
 
 export default async function bitrixAppRoutes(fastify) {
 
-  const appHtml = buildAppHtml();
   const installHtml = buildInstallHtml();
 
   fastify.get('/bitrix/app', async (request, reply) => {
-    reply.type('text/html').send(appHtml);
+    reply.type('text/html').send(buildAppHtml({}));
   });
 
   fastify.post('/bitrix/app', async (request, reply) => {
-    reply.type('text/html').send(appHtml);
+    // Bitrix24 sends auth data via POST form
+    const bitrixData = request.body || {};
+    reply.type('text/html').send(buildAppHtml(bitrixData));
   });
 
   fastify.get('/bitrix/install', async (request, reply) => {
@@ -25,11 +26,12 @@ export default async function bitrixAppRoutes(fastify) {
   });
 
   fastify.get('/bitrix/settings', async (request, reply) => {
-    reply.type('text/html').send(appHtml);
+    reply.type('text/html').send(buildAppHtml({}));
   });
 
   fastify.post('/bitrix/settings', async (request, reply) => {
-    reply.type('text/html').send(appHtml);
+    const bitrixData = request.body || {};
+    reply.type('text/html').send(buildAppHtml(bitrixData));
   });
 }
 
@@ -81,7 +83,12 @@ function buildInstallHtml() {
 }
 
 
-function buildAppHtml() {
+function buildAppHtml(bitrixData) {
+  const domain = bitrixData.DOMAIN || bitrixData.domain || '';
+  const authId = bitrixData.AUTH_ID || bitrixData.auth_id || '';
+  const memberId = bitrixData.member_id || '';
+  const appSid = bitrixData.APP_SID || '';
+  
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -887,21 +894,54 @@ function buildAppHtml() {
     }
 
     // ===== BOOT =====
+    // Bitrix24 data injected from server POST
+    var BX_DOMAIN = '${domain}';
+    var BX_AUTH_ID = '${authId}';
+    var BX_MEMBER_ID = '${memberId}';
+
     document.addEventListener('DOMContentLoaded', function() {
-      // Try Bitrix24 auto-auth first
+      // If we have Bitrix data from POST, auto-authenticate immediately
+      if (BX_DOMAIN && BX_MEMBER_ID) {
+        fetch('/auth/bitrix', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            domain: BX_DOMAIN,
+            member_id: BX_MEMBER_ID,
+            auth_id: BX_AUTH_ID
+          })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.token) {
+            setToken(data.token);
+            if (data.tenant_id) currentTenantId = data.tenant_id;
+            showApp();
+          } else {
+            tryBX24Auth();
+          }
+        })
+        .catch(function() { tryBX24Auth(); });
+        return;
+      }
+
+      // Fallback: try BX24 JS SDK
+      tryBX24Auth();
+    });
+
+    function tryBX24Auth() {
       try {
         BX24.init(function() {
           BX24.fitWindow();
           var auth = BX24.getAuth();
           if (auth && auth.domain) {
-            // Auto-authenticate via Bitrix24
             fetch('/auth/bitrix', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 domain: auth.domain,
-                member_id: auth.member_id,
-                auth_id: auth.access_token
+                member_id: auth.member_id || 'default',
+                auth_id: auth.access_token || ''
               })
             })
             .then(function(r) { return r.json(); })
@@ -911,25 +951,29 @@ function buildAppHtml() {
                 if (data.tenant_id) currentTenantId = data.tenant_id;
                 showApp();
               } else {
-                showLogin();
+                fallbackLogin();
               }
             })
-            .catch(function() { showLogin(); });
-          } else if (getToken()) {
-            showApp();
+            .catch(function() { fallbackLogin(); });
           } else {
-            showLogin();
+            fallbackLogin();
           }
         });
       } catch(e) {
-        // BX24 not available (direct access outside Bitrix24)
-        if (getToken()) {
-          showApp();
-        } else {
-          showLogin();
-        }
+        fallbackLogin();
       }
-    });
+    }
+
+    function fallbackLogin() {
+      if (getToken()) {
+        showApp();
+      } else {
+        showLogin();
+      }
+    }
+
+    // Init BX24 fitWindow if available
+    try { BX24.init(function() { BX24.fitWindow(); }); } catch(e) {}
   </script>
 </body>
 </html>`;
