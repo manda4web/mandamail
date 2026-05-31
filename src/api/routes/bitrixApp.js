@@ -90,9 +90,9 @@ function buildInstallHtml() {
 
 
 function buildAppHtml(bitrixData) {
-  const domain = bitrixData.DOMAIN || bitrixData.domain || '';
+  const domain = bitrixData.DOMAIN || bitrixData.domain || bitrixData.Domain || '';
   const authId = bitrixData.AUTH_ID || bitrixData.auth_id || '';
-  const memberId = bitrixData.member_id || '';
+  const memberId = bitrixData.member_id || bitrixData.MEMBER_ID || 'user';
   const appSid = bitrixData.APP_SID || '';
   
   return `<!DOCTYPE html>
@@ -904,6 +904,14 @@ function buildAppHtml(bitrixData) {
     var BX_DOMAIN = '${domain}';
     var BX_AUTH_ID = '${authId}';
     var BX_MEMBER_ID = '${memberId}';
+
+    // Also try to get DOMAIN from URL params (fallback)
+    (function() {
+      if (!BX_DOMAIN) {
+        var params = new URLSearchParams(window.location.search);
+        BX_DOMAIN = params.get('DOMAIN') || params.get('domain') || '';
+      }
+    })();
 
     document.addEventListener('DOMContentLoaded', function() {
       // If we have Bitrix data from POST, auto-authenticate immediately
