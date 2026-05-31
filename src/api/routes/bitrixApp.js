@@ -703,7 +703,7 @@ function buildAppHtml(bitrixData) {
             '<td><span class="badge badge-blue">' + mode + '</span></td>' +
             '<td>' + statusBadge + '</td>' +
             '<td>' + lastCheck + '</td>' +
-            '<td><button class="btn btn-sm btn-outline" onclick="toggleAccount(\'' + acc.id + '\',' + (acc.active !== false) + ')">' + (acc.active !== false ? '⏸ Pausar' : '▶ Ativar') + '</button> <button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + acc.id + '\')">🗑</button></td>' +
+            '<td><button class="btn btn-sm btn-outline" onclick="toggleAccount(&quot;' + acc.id + '&quot;,' + (acc.active !== false) + ')">' + (acc.active !== false ? '⏸ Pausar' : '▶ Ativar') + '</button> <button class="btn btn-sm btn-danger" onclick="deleteAccount(&quot;' + acc.id + '&quot;)">🗑</button></td>' +
             '</tr>';
         }).join('');
       } catch(e) {
