@@ -71,10 +71,10 @@ export class BitrixClient {
     let body = params;
 
     if (this.authId) {
-      // OAuth mode: use domain/rest/ endpoint (not oauth.bitrix.info)
+      // OAuth mode: auth token as query parameter
       const endpoint = this.baseUrl + '/rest';
-      url = `${endpoint}/${method}`;
-      body = { ...params, auth: this.authId };
+      url = `${endpoint}/${method}?auth=${this.authId}`;
+      body = params;
     } else if (this.token) {
       // Webhook mode (legacy)
       url = `${this.baseUrl}/${this.token}/${method}`;
