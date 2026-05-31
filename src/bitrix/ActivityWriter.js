@@ -2,10 +2,8 @@ import { BitrixClient } from './BitrixClient.js';
 import logger from '../logger.js';
 
 /**
- * Extracts data URI images from HTML, returning clean HTML and file data.
- * Uses string parsing instead of regex to handle very large base64 strings.
- * @param {string} html
- * @returns {{ html: string, images: Array<{name: string, data: string}> }}
+ * Extracts data URI images from HTML using string parsing (handles large base64).
+ * Returns cleaned HTML with placeholders and the extracted image data.
  */
 function extractDataUriImages(html) {
   if (!html) return { html: '', images: [] };
@@ -15,61 +13,62 @@ function extractDataUriImages(html) {
   let searchFrom = 0;
 
   while (true) {
-    // Find next <img with data: src
     const imgStart = html.indexOf('<img', searchFrom);
-    if (imgStart === -1) {
-      result += html.slice(searchFrom);
-      break;
-    }
+    if (imgStart === -1) { result += html.slice(searchFrom); break; }
 
-    const imgEnd = html.indexOf('>', imgStart);
-    if (imgEnd === -1) {
-      result += html.slice(searchFrom);
-      break;
-    }
+    const imgTagEnd = html.indexOf('>', imgStart);
+    if (imgTagEnd === -1) { result += html.slice(searchFrom); break; }
 
-    const imgTag = html.slice(imgStart, imgEnd + 1);
-
-    // Check if this img has a data: URI src
-    const dataMatch = imgTag.match(/src\s*=\s*["'](data:([^;]+);base64,)/i);
-    if (!dataMatch) {
-      // Not a data URI image, keep it
-      result += html.slice(searchFrom, imgEnd + 1);
-      searchFrom = imgEnd + 1;
+    // Check if src contains data:image
+    const srcIdx = html.indexOf('src=', imgStart);
+    if (srcIdx === -1 || srcIdx > imgTagEnd) {
+      result += html.slice(searchFrom, imgTagEnd + 1);
+      searchFrom = imgTagEnd + 1;
       continue;
     }
 
-    // Add everything before this img tag
-    result += html.slice(searchFrom, imgStart);
-
-    // Extract the base64 data
-    const mimeType = dataMatch[2];
-    const srcAttrStart = imgTag.indexOf(dataMatch[1]);
-    const base64Start = imgStart + srcAttrStart + dataMatch[1].length;
-
-    // Find the end of the base64 string (next quote character)
-    const quoteChar = imgTag.charAt(imgTag.indexOf(dataMatch[0]) + dataMatch[0].indexOf('data:') - 1);
-    const actualQuote = quoteChar === '"' || quoteChar === "'" ? quoteChar : '"';
-    let base64End = html.indexOf(actualQuote, base64Start);
-    if (base64End === -1) base64End = html.indexOf('"', base64Start);
-    if (base64End === -1) base64End = html.indexOf("'", base64Start);
-
-    if (base64End === -1) {
-      // Can't find end, skip this image
-      result += imgTag;
-      searchFrom = imgEnd + 1;
+    const quoteChar = html.charAt(srcIdx + 4); // " or '
+    if (quoteChar !== '"' && quoteChar !== "'") {
+      result += html.slice(searchFrom, imgTagEnd + 1);
+      searchFrom = imgTagEnd + 1;
       continue;
     }
 
-    const base64Data = html.slice(base64Start, base64End).replace(/\s/g, '');
+    const srcStart = srcIdx + 5; // after src="
+    const dataPrefix = 'data:image/';
+    if (!html.startsWith(dataPrefix, srcStart)) {
+      result += html.slice(searchFrom, imgTagEnd + 1);
+      searchFrom = imgTagEnd + 1;
+      continue;
+    }
+
+    // Found a data URI image — find the end quote
+    const srcEnd = html.indexOf(quoteChar, srcStart);
+    if (srcEnd === -1) { result += html.slice(searchFrom); break; }
+
+    // Extract mime type and base64
+    const dataUri = html.slice(srcStart, srcEnd);
+    const semiIdx = dataUri.indexOf(';base64,');
+    if (semiIdx === -1) {
+      result += html.slice(searchFrom, imgTagEnd + 1);
+      searchFrom = imgTagEnd + 1;
+      continue;
+    }
+
+    const mimeType = dataUri.slice(5, semiIdx); // after "data:"
+    const base64Data = dataUri.slice(semiIdx + 8); // after ";base64,"
 
     const idx = images.length + 1;
     const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z]/g, '');
-    images.push({ name: `inline_${idx}.${ext}`, data: base64Data });
+    images.push({ name: `inline_${idx}.${ext}`, data: base64Data.replace(/\s/g, '') });
 
-    // Add placeholder
+    // Add everything before this img, then placeholder
+    result += html.slice(searchFrom, imgStart);
     result += `<!--IMG_PLACEHOLDER_${idx}-->`;
-    searchFrom = imgEnd + 1;
+
+    // Skip past the entire img tag
+    const fullImgEnd = html.indexOf('>', srcEnd);
+    searchFrom = (fullImgEnd !== -1 ? fullImgEnd : imgTagEnd) + 1;
   }
 
   return { html: result, images };
@@ -79,78 +78,107 @@ export const ActivityWriter = {
   async write(tenant, email, dealId, contactId, accountEmail) {
     const bx = new BitrixClient(tenant);
     let body = email.bodyHtml || email.bodyText || '';
-    let inlineImages = [];
+    let dataUriImages = [];
 
-    // Extract data URI images from HTML
+    // Step 1: Extract data URI images from HTML (pasted images)
     if (email.bodyHtml && body.includes('data:image')) {
       logger.info(`[ActivityWriter] Found data:image in body (${body.length} chars), extracting...`);
       const extracted = extractDataUriImages(body);
       body = extracted.html;
-      inlineImages = extracted.images;
-      logger.info(`[ActivityWriter] Extracted ${inlineImages.length} inline image(s)`);
+      dataUriImages = extracted.images;
+      logger.info(`[ActivityWriter] Extracted ${dataUriImages.length} data URI image(s)`);
     }
 
-    // Upload inline images to Bitrix24 and get URLs
-    // Use disk.storage.getforapp to get the app's own storage
-    if (inlineImages.length > 0) {
-      let storageId = null;
+    // Step 2: Get storage for uploads
+    let storageId = null;
+    const hasCidImages = email.inlineImages && email.inlineImages.length > 0;
+    const needsUpload = dataUriImages.length > 0 || hasCidImages;
 
+    if (needsUpload) {
       try {
         const appStorage = await bx.call('disk.storage.getforapp', {});
         storageId = appStorage?.ID;
+        logger.info(`[ActivityWriter] App storage ID: ${storageId}`);
       } catch (e) {
         logger.warn(`[ActivityWriter] disk.storage.getforapp failed: ${e.message}`);
       }
 
-      // Fallback: try to get any writable storage
       if (!storageId) {
         try {
           const storages = await bx.call('disk.storage.getlist', {});
           if (storages && storages.length > 0) {
             storageId = storages[0].ID;
+            logger.info(`[ActivityWriter] Using first available storage ID: ${storageId}`);
           }
         } catch (e) {
           logger.warn(`[ActivityWriter] disk.storage.getlist failed: ${e.message}`);
         }
       }
+    }
 
-      for (let i = 0; i < inlineImages.length; i++) {
-        const img = inlineImages[i];
-        const placeholder = `<!--IMG_PLACEHOLDER_${i + 1}-->`;
-        let replaced = false;
+    // Step 3: Upload data URI images and replace placeholders
+    for (let i = 0; i < dataUriImages.length; i++) {
+      const img = dataUriImages[i];
+      const placeholder = `<!--IMG_PLACEHOLDER_${i + 1}-->`;
+      let replaced = false;
 
-        if (storageId) {
-          try {
-            const uploaded = await bx.call('disk.storage.uploadfile', {
-              id: storageId,
-              data: { NAME: img.name },
-              fileContent: [img.name, img.data],
-              generateUniqueName: true,
-            });
+      if (storageId) {
+        try {
+          const uploaded = await bx.call('disk.storage.uploadfile', {
+            id: storageId,
+            data: { NAME: img.name },
+            fileContent: [img.name, img.data],
+            generateUniqueName: true,
+          });
 
-            let downloadUrl = uploaded?.DOWNLOAD_URL;
-
-            // If no DOWNLOAD_URL directly, try disk.file.get
-            if (!downloadUrl && uploaded?.ID) {
-              const fileInfo = await bx.call('disk.file.get', { id: uploaded.ID });
-              downloadUrl = fileInfo?.DOWNLOAD_URL;
-            }
-
-            if (downloadUrl) {
-              body = body.replace(placeholder, `<img src="${downloadUrl}" style="max-width:100%">`);
-              replaced = true;
-              logger.info({ image: img.name, url: downloadUrl }, '[ActivityWriter] Uploaded inline image');
-            } else {
-              logger.warn({ image: img.name, uploadResult: JSON.stringify(uploaded).substring(0, 200) }, '[ActivityWriter] Upload succeeded but no DOWNLOAD_URL');
-            }
-          } catch (err) {
-            logger.warn(`[ActivityWriter] Upload failed for ${img.name}: ${err.message}`);
+          let downloadUrl = uploaded?.DOWNLOAD_URL;
+          if (!downloadUrl && uploaded?.ID) {
+            const fileInfo = await bx.call('disk.file.get', { id: uploaded.ID });
+            downloadUrl = fileInfo?.DOWNLOAD_URL;
           }
-        }
 
-        // If upload failed, remove placeholder
-        if (!replaced) {
-          body = body.replace(placeholder, '');
+          if (downloadUrl) {
+            body = body.replace(placeholder, `<img src="${downloadUrl}" style="max-width:100%">`);
+            replaced = true;
+            logger.info({ image: img.name, url: downloadUrl }, '[ActivityWriter] Uploaded data URI image');
+          } else {
+            logger.warn({ image: img.name, result: JSON.stringify(uploaded).substring(0, 300) }, '[ActivityWriter] No DOWNLOAD_URL');
+          }
+        } catch (err) {
+          logger.warn(`[ActivityWriter] Upload failed for ${img.name}: ${err.message}`);
+        }
+      }
+
+      if (!replaced) body = body.replace(placeholder, '');
+    }
+
+    // Step 4: Upload CID images and replace cid: references
+    if (storageId && hasCidImages) {
+      for (const img of email.inlineImages) {
+        try {
+          const uploaded = await bx.call('disk.storage.uploadfile', {
+            id: storageId,
+            data: { NAME: img.fileName },
+            fileContent: [img.fileName, img.data],
+            generateUniqueName: true,
+          });
+
+          let downloadUrl = uploaded?.DOWNLOAD_URL;
+          if (!downloadUrl && uploaded?.ID) {
+            const fileInfo = await bx.call('disk.file.get', { id: uploaded.ID });
+            downloadUrl = fileInfo?.DOWNLOAD_URL;
+          }
+
+          if (downloadUrl) {
+            const escaped = img.cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            body = body.replace(new RegExp(`(src=["'])cid:${escaped}(["'])`, 'gi'), `$1${downloadUrl}$2`);
+            logger.info({ image: img.fileName, cid: img.cid, url: downloadUrl }, '[ActivityWriter] Uploaded CID image');
+          }
+        } catch (err) {
+          logger.warn(`[ActivityWriter] CID upload failed for ${img.fileName}: ${err.message}`);
+          // Remove unresolvable CID image
+          const escaped = img.cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          body = body.replace(new RegExp(`<img[^>]*src=["']cid:${escaped}["'][^>]*/?>`, 'gi'), '');
         }
       }
     }

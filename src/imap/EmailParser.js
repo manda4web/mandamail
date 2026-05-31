@@ -12,11 +12,12 @@ const MAX_BODY_TEXT_LENGTH = 10_000;
 
 /**
  * Removes <script> and <style> tags and their content from HTML.
- * Preserves CID image references and data URI images for email rendering.
+ * Keeps CID references as-is (they will be resolved by ActivityWriter after upload).
+ * Removes data: URI images (they will be extracted separately before this is called).
  * Normalizes image sizes to max-width: 100%.
  *
  * @param {string} html - Raw HTML content
- * @param {Array} attachments - Parsed attachments with contentId and content
+ * @param {Array} attachments - Parsed attachments with contentId and content (unused now)
  * @returns {string} Cleaned HTML
  */
 export function cleanHtml(html, attachments = []) {
@@ -30,22 +31,8 @@ export function cleanHtml(html, attachments = []) {
   // Remove <style> tags and content
   cleaned = cleaned.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
 
-  // Replace CID references with base64 data URIs from attachments
-  // This ensures images display correctly in the email body
-  if (attachments && attachments.length > 0) {
-    for (const att of attachments) {
-      if (att.contentId && att.content) {
-        const cid = att.contentId.replace(/^<|>$/g, '');
-        const mimeType = att.contentType || att.mimeType || 'application/octet-stream';
-        const base64Data = att.content.toString('base64');
-        const dataUri = `data:${mimeType};base64,${base64Data}`;
-
-        // Replace cid: references in src attributes
-        const cidPattern = new RegExp(`(src=["'])cid:${escapeRegex(cid)}(["'])`, 'gi');
-        cleaned = cleaned.replace(cidPattern, `$1${dataUri}$2`);
-      }
-    }
-  }
+  // Keep CID references — ActivityWriter will replace with uploaded URLs
+  // Keep data: URI images — ActivityWriter will extract and upload them
 
   // Normalize image sizes - add max-width style to images without it
   cleaned = cleaned.replace(/<img\b([^>]*)>/gi, (match, attrs) => {
@@ -184,13 +171,29 @@ export function parseRaw(parsed) {
   // Process attachments (raw from mailparser)
   const rawAttachments = parsed.attachments || [];
 
-  // Clean HTML body (converts CID to data URIs, removes scripts/styles)
+  // Build inline images map from CID attachments (for ActivityWriter to upload)
+  const inlineImages = [];
+  if (rawAttachments && rawAttachments.length > 0) {
+    for (const att of rawAttachments) {
+      if (att.contentId && att.content) {
+        const cid = att.contentId.replace(/^<|>$/g, '');
+        const mimeType = att.contentType || att.mimeType || 'image/png';
+        inlineImages.push({
+          cid,
+          fileName: att.filename || `cid_${cid}.${mimeType.split('/')[1] || 'png'}`,
+          mimeType,
+          data: att.content.toString('base64'),
+        });
+      }
+    }
+  }
+
+  // Clean HTML body (removes scripts/styles, keeps CID refs and data URIs)
   let bodyHtml = parsed.html || null;
   if (bodyHtml) {
     bodyHtml = cleanHtml(bodyHtml, rawAttachments);
-    if (bodyHtml.length > MAX_BODY_HTML_LENGTH) {
-      bodyHtml = bodyHtml.substring(0, MAX_BODY_HTML_LENGTH);
-    }
+    // Do NOT truncate here — ActivityWriter will handle large bodies
+    // The data URIs will be extracted and replaced with URLs before sending to Bitrix
   }
 
   // Text body: use parsed.text or convert from HTML
@@ -264,6 +267,7 @@ export function parseRaw(parsed) {
     ccEmails,
     attachments,
     attachmentCount: attachments.length,
+    inlineImages,
     date,
   };
 }

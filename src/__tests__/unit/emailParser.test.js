@@ -94,7 +94,7 @@ describe('EmailParser', () => {
       expect(result.subject).toBe('Sem assunto');
     });
 
-    it('should truncate bodyHtml to 200,000 chars', () => {
+    it('should preserve full bodyHtml for ActivityWriter processing', () => {
       const longHtml = '<p>' + 'a'.repeat(250_000) + '</p>';
       const parsed = {
         messageId: '<test@example.com>',
@@ -104,7 +104,8 @@ describe('EmailParser', () => {
       };
 
       const result = parseRaw(parsed);
-      expect(result.bodyHtml.length).toBeLessThanOrEqual(200_000);
+      // bodyHtml is NOT truncated — ActivityWriter handles large bodies
+      expect(result.bodyHtml.length).toBeGreaterThan(200_000);
     });
 
     it('should truncate bodyText to 10,000 chars', () => {
@@ -163,8 +164,11 @@ describe('EmailParser', () => {
       expect(result.attachments[0].fileName).toBe('report.pdf');
       expect(result.attachments[1].fileName).toBe('image001.png');
       expect(result.attachmentCount).toBe(2);
-      // HTML should have data URI (CID resolved)
-      expect(result.bodyHtml).toContain('data:image/png;base64,');
+      // HTML keeps CID reference (ActivityWriter resolves it)
+      expect(result.bodyHtml).toContain('cid:image001');
+      // inlineImages should have the CID image data
+      expect(result.inlineImages).toHaveLength(1);
+      expect(result.inlineImages[0].cid).toBe('image001');
     });
 
     it('should handle empty to and cc fields', () => {
@@ -227,7 +231,7 @@ describe('EmailParser', () => {
       expect(result).toContain('Content');
     });
 
-    it('should replace CID references with base64 data URIs', () => {
+    it('should keep CID references in HTML (resolved by ActivityWriter)', () => {
       const html = '<img src="cid:image001">';
       const attachments = [
         {
@@ -238,8 +242,8 @@ describe('EmailParser', () => {
       ];
 
       const result = cleanHtml(html, attachments);
-      expect(result).toContain('data:image/png;base64,');
-      expect(result).not.toContain('cid:image001');
+      // CID references are kept — ActivityWriter uploads and replaces with URLs
+      expect(result).toContain('cid:image001');
     });
 
     it('should return empty string for null/undefined input', () => {
