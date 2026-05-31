@@ -16,6 +16,11 @@ export const EmailPipeline = {
     const email = parseRaw(parsedMail);
 
     // STEP 1: Save as RECEBIDO BEFORE any Bitrix call (Req 7.1, 7.2)
+    // Truncate body_html for DB storage (images are processed by ActivityWriter, not stored)
+    const bodyHtmlForDb = email.bodyHtml && email.bodyHtml.length > 500_000
+      ? email.bodyHtml.substring(0, 500_000)
+      : email.bodyHtml;
+
     const event = await EmailEventRepo.create({
       tenant_id: account.tenant_id,
       imap_account_id: account.id,
@@ -24,7 +29,7 @@ export const EmailPipeline = {
       from_name: email.fromName,
       reply_to: email.replyTo,
       subject: email.subject,
-      body_html: email.bodyHtml,
+      body_html: bodyHtmlForDb,
       body_text: email.bodyText,
       to_emails: email.toEmails,
       cc_emails: email.ccEmails,

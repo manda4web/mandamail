@@ -130,7 +130,13 @@ async function main() {
   alertService.start();
   logger.info('[Startup] AlertService started');
 
-  // 9. Log startup complete
+  // 9. Start CleanupWorker (daily cleanup of old data)
+  const { CleanupWorker } = await import('./jobs/CleanupWorker.js');
+  const cleanupWorker = new CleanupWorker(24); // runs every 24 hours
+  cleanupWorker.start();
+  logger.info('[Startup] CleanupWorker started');
+
+  // 10. Log startup complete
   logger.info('=== Application startup complete — ready to accept requests ===');
 
   // Graceful shutdown

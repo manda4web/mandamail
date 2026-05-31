@@ -803,7 +803,7 @@ function getAppJsInit() {
     '  if (page === "dashboard") loadDashboard();',
     '  else if (page === "accounts") loadAccounts();',
     '  else if (page === "mapping") loadMapping();',
-    '  else if (page === "logs") { logsPage = 1; loadLogs(); }',
+    '  else if (page === "logs") { logsPage = 1; setDefaultLogDates(); loadLogs(); }',
     '  else if (page === "settings") loadSettings();',
     '  else if (page === "plan") loadPlan();',
     '}',
@@ -1020,6 +1020,13 @@ function getAppJsAccounts() {
 function getAppJsLogs() {
   return [
     '// ===== LOGS =====',
+    'function setDefaultLogDates() {',
+    '  var end = new Date();',
+    '  var start = new Date(); start.setDate(start.getDate() - 10);',
+    '  document.getElementById("filter-start").value = start.toISOString().slice(0,10);',
+    '  document.getElementById("filter-end").value = end.toISOString().slice(0,10);',
+    '}',
+    '',
     'function loadLogs() {',
     '  if (!currentTenantId) return;',
     '  var tbody = document.getElementById("logs-tbody");',
