@@ -8,12 +8,15 @@ export default async function bitrixAppRoutes(fastify) {
   const installHtml = buildInstallHtml();
 
   fastify.get('/bitrix/app', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
     reply.type('text/html').send(buildAppHtml({}));
   });
 
   fastify.post('/bitrix/app', async (request, reply) => {
     // Bitrix24 sends auth data via POST form
     const bitrixData = request.body || {};
+    request.log.info({ bitrixKeys: Object.keys(bitrixData), domain: bitrixData.DOMAIN, member: bitrixData.member_id }, 'Bitrix24 POST /bitrix/app');
+    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
     reply.type('text/html').send(buildAppHtml(bitrixData));
   });
 
@@ -26,11 +29,13 @@ export default async function bitrixAppRoutes(fastify) {
   });
 
   fastify.get('/bitrix/settings', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
     reply.type('text/html').send(buildAppHtml({}));
   });
 
   fastify.post('/bitrix/settings', async (request, reply) => {
     const bitrixData = request.body || {};
+    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
     reply.type('text/html').send(buildAppHtml(bitrixData));
   });
 }
