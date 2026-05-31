@@ -12,7 +12,7 @@ const MAX_BODY_TEXT_LENGTH = 10_000;
 
 /**
  * Removes <script> and <style> tags and their content from HTML.
- * Replaces CID image references with base64 data URIs from attachments.
+ * Preserves CID image references and data URI images for email rendering.
  * Normalizes image sizes to max-width: 100%.
  *
  * @param {string} html - Raw HTML content
@@ -30,7 +30,8 @@ export function cleanHtml(html, attachments = []) {
   // Remove <style> tags and content
   cleaned = cleaned.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
 
-  // Replace CID references with base64 data URIs
+  // Replace CID references with base64 data URIs from attachments
+  // This ensures images display correctly in the email body
   if (attachments && attachments.length > 0) {
     for (const att of attachments) {
       if (att.contentId && att.content) {
@@ -183,7 +184,7 @@ export function parseRaw(parsed) {
   // Process attachments (raw from mailparser)
   const rawAttachments = parsed.attachments || [];
 
-  // Clean HTML body
+  // Clean HTML body (converts CID to data URIs, removes scripts/styles)
   let bodyHtml = parsed.html || null;
   if (bodyHtml) {
     bodyHtml = cleanHtml(bodyHtml, rawAttachments);
@@ -221,20 +222,32 @@ export function parseRaw(parsed) {
     }
   }
 
-  // Process attachments: filter out inline CID images, map to structured format
-  const attachments = rawAttachments
-    .filter((att) => {
-      // Filter out inline CID images (they are embedded in HTML)
-      if (att.contentId && att.contentDisposition === 'inline') {
-        return false;
-      }
-      return true;
-    })
-    .map((att) => ({
-      fileName: att.filename || 'unnamed',
-      mimeType: att.contentType || 'application/octet-stream',
-      fileData: att.content ? att.content.toString('base64') : '',
-    }));
+  // Process attachments: separate inline CID images from regular attachments
+  // Inline CID images will be uploaded separately by ActivityWriter
+  const regularAttachments = [];
+  const inlineAttachments = [];
+
+  for (const att of rawAttachments) {
+    if (att.contentId && att.contentDisposition === 'inline' && att.content) {
+      // Inline CID image — will be sent as FILES in the activity for inline rendering
+      const cid = att.contentId.replace(/^<|>$/g, '');
+      inlineAttachments.push({
+        fileName: att.filename || `inline_${cid}.${(att.contentType || 'image/png').split('/')[1] || 'png'}`,
+        mimeType: att.contentType || 'image/png',
+        fileData: att.content.toString('base64'),
+        contentId: cid,
+      });
+    } else if (att.content) {
+      // Regular attachment
+      regularAttachments.push({
+        fileName: att.filename || 'unnamed',
+        mimeType: att.contentType || 'application/octet-stream',
+        fileData: att.content.toString('base64'),
+      });
+    }
+  }
+
+  const attachments = [...regularAttachments, ...inlineAttachments];
 
   // Extract date
   const date = parsed.date || new Date();

@@ -9,6 +9,12 @@ vi.mock('../../db/repos/EmailEventRepo.js', () => ({
   },
 }));
 
+vi.mock('../../db/repos/BitrixResultRepo.js', () => ({
+  BitrixResultRepo: {
+    countDealsByTenant: vi.fn().mockResolvedValue(0),
+  },
+}));
+
 vi.mock('../../imap/TenantScheduler.js', () => ({
   TenantScheduler: {
     status: vi.fn(),
@@ -164,6 +170,11 @@ describe('Events Routes', () => {
   describe('GET /tenants/:id/dashboard', () => {
     it('returns daily stats for the tenant', async () => {
       const mockStats = {
+        today: '15',
+        week: '42',
+        success_today: '10',
+        errors: '2',
+        pending: '3',
         recebido: '5',
         processando: '2',
         sucesso: '10',
@@ -181,7 +192,8 @@ describe('Events Routes', () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(JSON.parse(response.payload)).toEqual(mockStats);
+      const payload = JSON.parse(response.payload);
+      expect(payload).toEqual({ ...mockStats, deals_count: 0 });
       expect(EmailEventRepo.getDailyStats).toHaveBeenCalledWith('tenant-456');
     });
   });

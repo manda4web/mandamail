@@ -82,9 +82,13 @@ export default async function eventsRoutes(fastify) {
   }, async (request, reply) => {
     const tenantId = request.params.id;
 
-    const stats = await EmailEventRepo.getDailyStats(tenantId);
+    const { BitrixResultRepo } = await import('../../db/repos/BitrixResultRepo.js');
+    const [stats, dealsCount] = await Promise.all([
+      EmailEventRepo.getDailyStats(tenantId),
+      BitrixResultRepo.countDealsByTenant(tenantId),
+    ]);
 
-    return reply.send(stats);
+    return reply.send({ ...stats, deals_count: dealsCount });
   });
 
   /**

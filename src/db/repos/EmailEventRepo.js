@@ -97,6 +97,11 @@ export const EmailEventRepo = {
   async getDailyStats(tenantId) {
     const { rows } = await db.query(
       `SELECT
+        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS today,
+        COUNT(*) FILTER (WHERE created_at >= date_trunc('week', CURRENT_DATE)) AS week,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= CURRENT_DATE) AS success_today,
+        COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA') AND created_at >= CURRENT_DATE) AS errors,
+        COUNT(*) FILTER (WHERE status IN ('RECEBIDO','PROCESSANDO') AND created_at >= CURRENT_DATE) AS pending,
         COUNT(*) FILTER (WHERE status = 'RECEBIDO') AS recebido,
         COUNT(*) FILTER (WHERE status = 'PROCESSANDO') AS processando,
         COUNT(*) FILTER (WHERE status = 'SUCESSO') AS sucesso,
@@ -106,8 +111,7 @@ export const EmailEventRepo = {
         COUNT(*) FILTER (WHERE status = 'FALHA_DEFINITIVA') AS falha_definitiva,
         COUNT(*) AS total
       FROM email_events
-      WHERE tenant_id = $1
-        AND created_at >= CURRENT_DATE`,
+      WHERE tenant_id = $1`,
       [tenantId]
     );
     return rows[0];

@@ -42,6 +42,18 @@ export const EmailPipeline = {
         return;
       }
 
+      // STEP 2.5: Check if this email already generated a deal previously.
+      // Prevents re-creating deals on IMAP reconnections or re-fetches.
+      // Only manual "Reprocess" from logs should create a new deal.
+      if (email.messageId) {
+        const alreadyProcessed = await BitrixResultRepo.existsByMessageId(account.id, email.messageId, event.id);
+        if (alreadyProcessed) {
+          await EmailEventRepo.setStatus(event.id, 'DUPLICADO');
+          logger.info(`[Pipeline] DUPLICADO (deal já criado anteriormente) id=${event.id} messageId=${email.messageId}`);
+          return;
+        }
+      }
+
       // STEP 3: Filtering (Req 6)
       if (FilterEngine.shouldIgnore(account, email)) {
         await EmailEventRepo.setStatus(event.id, 'IGNORADO');
@@ -103,7 +115,7 @@ export const EmailPipeline = {
     apiLog.deal = { dealId };
 
     // Activity + timeline comment (Req 10)
-    const activityId = await ActivityWriter.write(tenant, email, dealId, contactId);
+    const activityId = await ActivityWriter.write(tenant, email, dealId, contactId, account.email);
     apiLog.activity = { activityId };
 
     // Attachments (Req 11)

@@ -28,4 +28,35 @@ export const BitrixResultRepo = {
     );
     return rows[0] || null;
   },
+
+  async countDealsByTenant(tenantId) {
+    const { rows } = await db.query(
+      'SELECT COUNT(*) AS count FROM bitrix_results WHERE tenant_id = $1 AND bitrix_deal_id IS NOT NULL',
+      [tenantId]
+    );
+    return parseInt(rows[0].count, 10);
+  },
+
+  /**
+   * Check if a deal was already created for this message_id on this IMAP account.
+   * Used to prevent re-creating deals when IMAP re-fetches old emails.
+   * Excludes the current event from the check.
+   * @param {string} imapAccountId - IMAP account UUID
+   * @param {string} messageId - Email Message-ID header
+   * @param {string} currentEventId - Current event ID to exclude
+   * @returns {Promise<boolean>} true if a deal already exists for this message
+   */
+  async existsByMessageId(imapAccountId, messageId, currentEventId) {
+    const { rows } = await db.query(
+      `SELECT br.id FROM bitrix_results br
+       JOIN email_events ee ON ee.id = br.email_event_id
+       WHERE ee.imap_account_id = $1
+         AND ee.message_id = $2
+         AND ee.id != $3
+         AND br.bitrix_deal_id IS NOT NULL
+       LIMIT 1`,
+      [imapAccountId, messageId, currentEventId]
+    );
+    return rows.length > 0;
+  },
 };

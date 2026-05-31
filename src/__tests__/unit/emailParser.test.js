@@ -134,7 +134,7 @@ describe('EmailParser', () => {
       expect(result.bodyText).toContain('Second paragraph');
     });
 
-    it('should filter out inline CID attachments', () => {
+    it('should include inline CID attachments for upload to timeline', () => {
       const parsed = {
         messageId: '<test@example.com>',
         from: { value: [{ address: 'test@example.com', name: 'Test' }] },
@@ -158,9 +158,13 @@ describe('EmailParser', () => {
       };
 
       const result = parseRaw(parsed);
-      expect(result.attachments).toHaveLength(1);
+      // Both inline and regular attachments are included
+      expect(result.attachments).toHaveLength(2);
       expect(result.attachments[0].fileName).toBe('report.pdf');
-      expect(result.attachmentCount).toBe(1);
+      expect(result.attachments[1].fileName).toBe('image001.png');
+      expect(result.attachmentCount).toBe(2);
+      // HTML should have data URI (CID resolved)
+      expect(result.bodyHtml).toContain('data:image/png;base64,');
     });
 
     it('should handle empty to and cc fields', () => {
