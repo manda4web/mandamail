@@ -1052,7 +1052,6 @@ function getAppJsLogs() {
     '        var badge = statusBadge(ev.status);',
     '        var actions = "";',
     '        actions = \'<button class="btn btn-sm btn-primary btn-reprocess" data-id="\' + ev.id + \'">🔄</button> <button class="btn btn-sm btn-outline btn-view-error" data-id="\' + ev.id + \'">👁</button>\';',
-    '        }',
     '        var dealCell = "—";',
     '        if (ev.bitrix_deal_id) {',
     '          var dealUrl = "https://" + (bitrixData.domain || "manda4.bitrix24.com.br") + "/crm/deal/details/" + ev.bitrix_deal_id + "/";',
