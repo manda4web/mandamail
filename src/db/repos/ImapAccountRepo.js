@@ -40,7 +40,8 @@ export async function findAllActive() {
        t.bitrix_stage_id,
        t.bitrix_responsible_id,
        t.ignore_from,
-       t.ignore_subject
+       t.ignore_subject,
+       t.auth_id
      FROM imap_accounts ia
      JOIN tenants t ON t.id = ia.tenant_id
      WHERE ia.active = true AND t.active = true`
@@ -64,7 +65,8 @@ export async function findById(id) {
        t.bitrix_stage_id,
        t.bitrix_responsible_id,
        t.ignore_from,
-       t.ignore_subject
+       t.ignore_subject,
+       t.auth_id
      FROM imap_accounts ia
      JOIN tenants t ON t.id = ia.tenant_id
      WHERE ia.id = $1`,
