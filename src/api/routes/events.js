@@ -134,20 +134,64 @@ export default async function eventsRoutes(fastify) {
     // Reset status to allow reprocessing
     await EmailEventRepo.setStatus(event.id, 'PROCESSANDO');
 
-    // Reconstruct email object
-    const email = {
-      messageId: event.message_id,
-      fromEmail: event.from_email,
-      fromName: event.from_name,
-      replyTo: event.reply_to,
-      subject: event.subject,
-      bodyHtml: event.body_html,
-      bodyText: event.body_text,
-      toEmails: event.to_emails || [],
-      ccEmails: event.cc_emails || [],
-      attachments: [],
-      date: event.received_at,
-    };
+    // Try to fetch the original email from IMAP (to get attachments)
+    let email;
+    try {
+      const { ImapFlow } = await import('imapflow');
+      const { simpleParser } = await import('mailparser');
+      const { parseRaw } = await import('../../imap/EmailParser.js');
+
+      const imapClient = new ImapFlow({
+        host: account.host,
+        port: account.port || 993,
+        secure: account.use_ssl !== false,
+        auth: { user: account.username, pass: account.password },
+        logger: false,
+        greetTimeout: 15000,
+        socketTimeout: 15000,
+      });
+
+      await imapClient.connect();
+      const lock = await imapClient.getMailboxLock(account.mailbox || 'INBOX');
+
+      try {
+        // Search for the email by Message-ID
+        const uids = await imapClient.search({ header: { 'message-id': event.message_id } });
+
+        if (uids && uids.length > 0) {
+          // Fetch the full email source
+          const msg = await imapClient.fetchOne(uids[0], { source: true }, { uid: true });
+          if (msg && msg.source) {
+            const parsed = await simpleParser(msg.source);
+            email = parseRaw(parsed);
+            logger.info({ eventId: event.id }, 'Reprocess: fetched original email from IMAP with attachments');
+          }
+        }
+      } finally {
+        lock.release();
+        await imapClient.logout();
+      }
+    } catch (imapErr) {
+      logger.warn({ eventId: event.id, error: imapErr.message }, 'Reprocess: could not fetch from IMAP, using stored data');
+    }
+
+    // Fallback: reconstruct from database (without attachments)
+    if (!email) {
+      email = {
+        messageId: event.message_id,
+        fromEmail: event.from_email,
+        fromName: event.from_name,
+        replyTo: event.reply_to,
+        subject: event.subject,
+        bodyHtml: event.body_html,
+        bodyText: event.body_text,
+        toEmails: event.to_emails || [],
+        ccEmails: event.cc_emails || [],
+        attachments: [],
+        inlineImages: [],
+        date: event.received_at,
+      };
+    }
 
     // Reprocess in background
     const { EmailPipeline } = await import('../../pipeline/EmailPipeline.js');
