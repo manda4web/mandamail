@@ -13,7 +13,7 @@ export default async function bitrixAppRoutes(fastify) {
 
   fastify.post('/bitrix/app', async (request, reply) => {
     const data = extractBitrixData(request.query, request.body);
-    request.log.info({ domain: data.domain, member_id: data.member_id }, 'Bitrix24 POST /bitrix/app');
+    request.log.info({ domain: data.domain, member_id: data.member_id, has_auth: !!data.auth_id, has_refresh: !!data.refresh_id, body_keys: Object.keys(request.body || {}) }, 'Bitrix24 POST /bitrix/app');
     reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
     reply.type('text/html').send(buildAppHtml(data));
   });
