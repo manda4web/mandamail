@@ -34,11 +34,7 @@ export function buildApp() {
 
   // === SECURITY: CORS ===
   app.register(cors, {
-    origin: [
-      /\.bitrix24\.com\.br$/,
-      /\.bitrix24\.com$/,
-      /mandamail\.manda4\.com\.br$/,
-    ],
+    origin: true, // Allow all origins (app runs inside Bitrix24 iframe from any portal)
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
   });
