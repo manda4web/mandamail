@@ -101,11 +101,21 @@ export class BitrixClient {
         if (!response.ok) {
           const statusCode = response.status;
 
+          // Check if token expired (401) — try refresh
+          if (statusCode === 401 && this.authId && this.tenant && this.tenant.refresh_id && !this._refreshed) {
+            logger.info({ method }, 'Token expired, attempting refresh...');
+            const refreshed = await this._refreshToken();
+            if (refreshed) {
+              this._refreshed = true; // prevent infinite refresh loop
+              return this.call(method, params);
+            }
+          }
+
           if (!isTransientError(statusCode)) {
             // Non-transient error — propagate immediately
-            const body = await response.text().catch(() => '');
+            const respBody = await response.text().catch(() => '');
             throw new BitrixError(
-              `Bitrix24 API error: ${statusCode} - ${body}`,
+              `Bitrix24 API error: ${statusCode} - ${respBody}`,
               { type: 'non-transient', statusCode, attempts: attempt }
             );
           }
@@ -157,5 +167,58 @@ export class BitrixClient {
    */
   async _delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Refreshes the OAuth token using the refresh_id.
+   * Updates the tenant in the database with the new tokens.
+   * @returns {Promise<boolean>} true if refresh succeeded
+   */
+  async _refreshToken() {
+    const clientId = process.env.BITRIX_CLIENT_ID;
+    const clientSecret = process.env.BITRIX_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      logger.error('Cannot refresh token: BITRIX_CLIENT_ID or BITRIX_CLIENT_SECRET not configured');
+      return false;
+    }
+
+    try {
+      const refreshUrl = `https://oauth.bitrix.info/oauth/token/?grant_type=refresh_token&client_id=${clientId}&client_secret=${clientSecret}&refresh_token=${this.tenant.refresh_id}`;
+
+      const res = await fetch(refreshUrl, { signal: AbortSignal.timeout(15000) });
+      const data = await res.json();
+
+      if (data.error) {
+        logger.error({ error: data.error, description: data.error_description }, 'Token refresh failed');
+        return false;
+      }
+
+      if (data.access_token) {
+        // Update in-memory
+        this.authId = data.access_token;
+        this.tenant.auth_id = data.access_token;
+        if (data.refresh_token) this.tenant.refresh_id = data.refresh_token;
+
+        // Update in database
+        try {
+          const { db } = await import('../db/client.js');
+          await db.query(
+            'UPDATE tenants SET auth_id = $1, refresh_id = $2, auth_expires_at = NOW() + INTERVAL \'1 hour\' WHERE bitrix_url = $3',
+            [data.access_token, data.refresh_token || this.tenant.refresh_id, this.baseUrl]
+          );
+          logger.info({ domain: this.baseUrl }, 'OAuth token refreshed successfully');
+        } catch (dbErr) {
+          logger.error({ error: dbErr.message }, 'Failed to save refreshed token to DB');
+        }
+
+        return true;
+      }
+
+      return false;
+    } catch (err) {
+      logger.error({ error: err.message }, 'Token refresh request failed');
+      return false;
+    }
   }
 }
