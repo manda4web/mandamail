@@ -73,6 +73,7 @@ export async function update(id, data) {
     'bitrix_stage_id',
     'ignore_from',
     'ignore_subject',
+    'field_mapping',
     'plan',
     'active',
   ];
