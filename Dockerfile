@@ -1,11 +1,14 @@
 # ---- Build Stage ----
 FROM node:20-alpine AS build
 
+# Install build tools for native modules (bcrypt)
+RUN apk add --no-cache python3 make g++
+
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
 
-RUN npm ci --ignore-scripts
+RUN npm ci
 
 COPY . .
 
@@ -16,9 +19,15 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Install build tools for native modules (bcrypt)
+RUN apk add --no-cache python3 make g++
+
 # Install only production dependencies
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev --ignore-scripts
+RUN npm ci --omit=dev
+
+# Remove build tools to reduce image size
+RUN apk del python3 make g++
 
 # Copy application code from build stage
 COPY --from=build /app/src ./src
