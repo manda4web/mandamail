@@ -148,8 +148,11 @@ export const EmailEventRepo = {
     }
 
     if (endDate) {
-      conditions.push(`e.created_at <= $${paramIndex++}`);
-      params.push(endDate);
+      // Include the entire end day (add 1 day to cover until 23:59:59)
+      const endDatePlusOne = new Date(endDate);
+      endDatePlusOne.setDate(endDatePlusOne.getDate() + 1);
+      conditions.push(`e.created_at < $${paramIndex++}`);
+      params.push(endDatePlusOne.toISOString().slice(0, 10));
     }
 
     const whereClause = conditions.join(' AND ');
