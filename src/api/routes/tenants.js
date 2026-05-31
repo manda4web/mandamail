@@ -11,12 +11,19 @@ import { ImapFlow } from 'imapflow';
  * @param {import('fastify').FastifyInstance} fastify
  */
 export async function tenantsRoutes(fastify) {
-  // GET /tenants — list all active tenants (admin only)
+  // GET /tenants — list tenants (admin: all, tenant_user: own tenants)
   fastify.get('/tenants', {
-    preHandler: [requireRole('admin')],
+    preHandler: [requireRole('admin', 'tenant_user')],
   }, async (request, reply) => {
-    const tenants = await TenantRepo.findAllActive();
-    return tenants;
+    if (request.user.role === 'admin') {
+      return TenantRepo.findAllActive();
+    }
+    // For tenant_user, get their associated tenants
+    const { UserRepo } = await import('../../db/repos/UserRepo.js');
+    const userTenants = await UserRepo.findTenantsByUser(request.user.id);
+    const tenantIds = userTenants.map(ut => ut.tenant_id);
+    const allTenants = await TenantRepo.findAllActive();
+    return allTenants.filter(t => tenantIds.includes(t.id));
   });
 
   // POST /tenants — create tenant with unique bitrix_url validation
@@ -53,7 +60,7 @@ export async function tenantsRoutes(fastify) {
 
   // PATCH /tenants/:id — update tenant fields
   fastify.patch('/tenants/:id', {
-    preHandler: [requireRole('admin')],
+    preHandler: [requireRole('admin', 'tenant_user')],
   }, async (request, reply) => {
     const { id } = request.params;
 
