@@ -6,24 +6,70 @@ export const DealBuilder = {
   async create(tenant, email, contactId) {
     const bx = new BitrixClient(tenant);
 
-    // Deal title: email subject truncated to 300 chars, fallback to from_email (Req 9.3, 9.4)
+    // Get field mapping from tenant config
+    const mapping = tenant.field_mapping || {};
+
+    // Deal title: email subject truncated to 300 chars, fallback to from_email
     let title = email.subject || email.fromEmail;
     if (title.length > MAX_TITLE_LENGTH) {
       title = title.substring(0, MAX_TITLE_LENGTH);
     }
 
     const body = email.bodyHtml || email.bodyText || '';
+    const domain = email.fromEmail ? email.fromEmail.split('@')[1] || '' : '';
+    const preview = (email.bodyText || '').substring(0, 200);
+    const emailDate = email.date ? new Date(email.date).toISOString() : new Date().toISOString();
 
-    const dealId = await bx.call('crm.deal.add', {
-      fields: {
-        TITLE: title,
-        STAGE_ID: tenant.bitrix_stage_id,
-        CATEGORY_ID: tenant.bitrix_category_id,
-        CONTACT_IDS: [contactId],
-        COMMENTS: body,
-        ASSIGNED_BY_ID: tenant.bitrix_responsible_id,
-      },
-    });
+    // Build fields object based on mapping
+    const fields = {
+      STAGE_ID: tenant.bitrix_stage_id || 'NEW',
+      CATEGORY_ID: tenant.bitrix_category_id || 0,
+      CONTACT_IDS: [contactId],
+      ASSIGNED_BY_ID: tenant.bitrix_responsible_id || 1,
+    };
+
+    // Apply mapped fields (or defaults)
+    const subjectField = mapping.subject || 'TITLE';
+    const bodyField = mapping.body || 'COMMENTS';
+    const domainField = mapping.domain || '';
+    const dateField = mapping.date || '';
+    const previewField = mapping.preview || '';
+    const sourceId = mapping.source_id || '';
+
+    // Always set TITLE (required for deal)
+    fields.TITLE = title;
+
+    // Map subject to configured field (if different from TITLE)
+    if (subjectField && subjectField !== 'TITLE') {
+      fields[subjectField] = title;
+    }
+
+    // Map body to configured field
+    if (bodyField) {
+      fields[bodyField] = body;
+    }
+
+    // Map domain to configured field
+    if (domainField && domain) {
+      fields[domainField] = domain;
+    }
+
+    // Map date to configured field
+    if (dateField && emailDate) {
+      fields[dateField] = emailDate;
+    }
+
+    // Map preview to configured field
+    if (previewField && preview) {
+      fields[previewField] = preview;
+    }
+
+    // Set source if configured
+    if (sourceId) {
+      fields.SOURCE_ID = sourceId;
+    }
+
+    const dealId = await bx.call('crm.deal.add', { fields });
 
     return dealId;
   },

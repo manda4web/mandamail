@@ -76,6 +76,8 @@ export const EmailPipeline = {
       bitrix_stage_id: account.bitrix_stage_id,
       bitrix_responsible_id: account.bitrix_responsible_id,
       auth_id: account.auth_id,
+      refresh_id: account.refresh_id,
+      field_mapping: account.field_mapping,
     };
 
     const apiLog = {};
