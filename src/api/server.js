@@ -21,6 +21,16 @@ export function buildApp() {
     },
   });
 
+  // Support application/x-www-form-urlencoded (Bitrix24 sends POST with this content-type)
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (req, body, done) => {
+    try {
+      const parsed = Object.fromEntries(new URLSearchParams(body));
+      done(null, parsed);
+    } catch (err) {
+      done(err);
+    }
+  });
+
   // Public routes (no auth required)
   app.register(authRoutes);
   app.register(bitrixAppRoutes);

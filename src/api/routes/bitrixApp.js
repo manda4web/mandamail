@@ -167,16 +167,23 @@ export default async function bitrixAppRoutes(fastify) {
     reply.type('text/html').send(html);
   });
 
-  // POST handlers (Bitrix may POST to these URLs too)
+  // POST handlers (Bitrix sends POST with form data when opening in iframe)
   fastify.post('/bitrix/app', async (request, reply) => {
-    reply.redirect('/bitrix/app');
+    // Bitrix sends PLACEMENT, AUTH_ID, etc. via POST
+    return fastify.inject({ method: 'GET', url: '/bitrix/app' }).then(res => {
+      reply.type('text/html').send(res.body);
+    });
   });
 
   fastify.post('/bitrix/install', async (request, reply) => {
-    reply.redirect('/bitrix/install');
+    return fastify.inject({ method: 'GET', url: '/bitrix/install' }).then(res => {
+      reply.type('text/html').send(res.body);
+    });
   });
 
   fastify.post('/bitrix/settings', async (request, reply) => {
-    reply.redirect('/bitrix/settings');
+    return fastify.inject({ method: 'GET', url: '/bitrix/settings' }).then(res => {
+      reply.type('text/html').send(res.body);
+    });
   });
 }
