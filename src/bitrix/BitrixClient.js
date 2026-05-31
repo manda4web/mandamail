@@ -71,8 +71,8 @@ export class BitrixClient {
     let body = params;
 
     if (this.authId) {
-      // OAuth mode: use server_endpoint or construct from domain
-      const endpoint = this.serverEndpoint || (this.baseUrl + '/rest');
+      // OAuth mode: use domain/rest/ endpoint (not oauth.bitrix.info)
+      const endpoint = this.baseUrl + '/rest';
       url = `${endpoint}/${method}`;
       body = { ...params, auth: this.authId };
     } else if (this.token) {
