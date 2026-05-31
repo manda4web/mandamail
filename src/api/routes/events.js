@@ -123,8 +123,8 @@ export default async function eventsRoutes(fastify) {
     const event = await EmailEventRepo.findById(request.params.eventId);
     if (!event) return reply.code(404).send({ error: 'Event not found' });
 
-    if (!['ERRO', 'FALHA_DEFINITIVA'].includes(event.status)) {
-      return reply.code(400).send({ error: 'Only events with ERRO or FALHA_DEFINITIVA status can be reprocessed' });
+    if (!['ERRO', 'FALHA_DEFINITIVA', 'IGNORADO', 'DUPLICADO'].includes(event.status)) {
+      return reply.code(400).send({ error: 'Only events with ERRO, FALHA_DEFINITIVA, IGNORADO or DUPLICADO status can be reprocessed' });
     }
 
     const ImapAccountRepoModule = await import('../../db/repos/ImapAccountRepo.js');

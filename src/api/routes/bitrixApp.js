@@ -1053,6 +1053,8 @@ function getAppJsLogs() {
     '        var actions = "";',
     '        if (ev.status === "ERRO" || ev.status === "FALHA_DEFINITIVA") {',
     '          actions = \'<button class="btn btn-sm btn-primary btn-reprocess" data-id="\' + ev.id + \'">🔄</button> <button class="btn btn-sm btn-outline btn-view-error" data-id="\' + ev.id + \'">👁</button>\';',
+    '        } else if (ev.status === "IGNORADO" || ev.status === "DUPLICADO") {',
+    '          actions = \'<button class="btn btn-sm btn-primary btn-reprocess" data-id="\' + ev.id + \'">🔄</button>\';',
     '        } else if (ev.status === "SUCESSO") {',
     '          actions = \'<button class="btn btn-sm btn-outline btn-view-error" data-id="\' + ev.id + \'">👁</button>\';',
     '        }',
