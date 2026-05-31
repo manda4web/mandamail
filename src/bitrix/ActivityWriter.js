@@ -3,6 +3,7 @@ import logger from '../logger.js';
 
 /**
  * Extracts data URI images from HTML, returning clean HTML and file data.
+ * Uses string parsing instead of regex to handle very large base64 strings.
  * @param {string} html
  * @returns {{ html: string, images: Array<{name: string, data: string}> }}
  */
@@ -10,21 +11,68 @@ function extractDataUriImages(html) {
   if (!html) return { html: '', images: [] };
 
   const images = [];
-  let idx = 0;
+  let result = '';
+  let searchFrom = 0;
 
-  const cleaned = html.replace(
-    /<img[^>]*\ssrc\s*=\s*["'](data:([^;]+);base64,([^"']+))["'][^>]*\/?>/gi,
-    (match, fullDataUri, mimeType, base64) => {
-      idx++;
-      const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z]/g, '');
-      const name = `inline_${idx}.${ext}`;
-      images.push({ name, data: base64.replace(/\s/g, '') });
-      // Leave a placeholder — will be removed if upload fails
-      return `<!--IMG_PLACEHOLDER_${idx}-->`;
+  while (true) {
+    // Find next <img with data: src
+    const imgStart = html.indexOf('<img', searchFrom);
+    if (imgStart === -1) {
+      result += html.slice(searchFrom);
+      break;
     }
-  );
 
-  return { html: cleaned, images };
+    const imgEnd = html.indexOf('>', imgStart);
+    if (imgEnd === -1) {
+      result += html.slice(searchFrom);
+      break;
+    }
+
+    const imgTag = html.slice(imgStart, imgEnd + 1);
+
+    // Check if this img has a data: URI src
+    const dataMatch = imgTag.match(/src\s*=\s*["'](data:([^;]+);base64,)/i);
+    if (!dataMatch) {
+      // Not a data URI image, keep it
+      result += html.slice(searchFrom, imgEnd + 1);
+      searchFrom = imgEnd + 1;
+      continue;
+    }
+
+    // Add everything before this img tag
+    result += html.slice(searchFrom, imgStart);
+
+    // Extract the base64 data
+    const mimeType = dataMatch[2];
+    const srcAttrStart = imgTag.indexOf(dataMatch[1]);
+    const base64Start = imgStart + srcAttrStart + dataMatch[1].length;
+
+    // Find the end of the base64 string (next quote character)
+    const quoteChar = imgTag.charAt(imgTag.indexOf(dataMatch[0]) + dataMatch[0].indexOf('data:') - 1);
+    const actualQuote = quoteChar === '"' || quoteChar === "'" ? quoteChar : '"';
+    let base64End = html.indexOf(actualQuote, base64Start);
+    if (base64End === -1) base64End = html.indexOf('"', base64Start);
+    if (base64End === -1) base64End = html.indexOf("'", base64Start);
+
+    if (base64End === -1) {
+      // Can't find end, skip this image
+      result += imgTag;
+      searchFrom = imgEnd + 1;
+      continue;
+    }
+
+    const base64Data = html.slice(base64Start, base64End).replace(/\s/g, '');
+
+    const idx = images.length + 1;
+    const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z]/g, '');
+    images.push({ name: `inline_${idx}.${ext}`, data: base64Data });
+
+    // Add placeholder
+    result += `<!--IMG_PLACEHOLDER_${idx}-->`;
+    searchFrom = imgEnd + 1;
+  }
+
+  return { html: result, images };
 }
 
 export const ActivityWriter = {
