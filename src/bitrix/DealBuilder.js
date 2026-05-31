@@ -6,6 +6,27 @@ export const DealBuilder = {
   async create(tenant, email, contactId) {
     const bx = new BitrixClient(tenant);
 
+    // Check deal_mode: merge_by_contact = find existing deal for this contact
+    if (tenant.deal_mode === 'merge_by_contact' && contactId) {
+      try {
+        const existingDeals = await bx.call('crm.deal.list', {
+          filter: {
+            CONTACT_ID: contactId,
+            CATEGORY_ID: tenant.bitrix_category_id || 0,
+            '!STAGE_SEMANTIC_ID': 'S', // exclude won deals
+          },
+          select: ['ID'],
+          order: { ID: 'DESC' },
+        });
+        if (existingDeals && existingDeals.length > 0) {
+          // Deal exists for this contact — return existing deal ID (don't create new)
+          return existingDeals[0].ID;
+        }
+      } catch (e) {
+        // If search fails, fall through to create new deal
+      }
+    }
+
     // Get field mapping from tenant config
     const mapping = tenant.field_mapping || {};
 

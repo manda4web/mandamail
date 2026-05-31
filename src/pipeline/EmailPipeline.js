@@ -49,6 +49,17 @@ export const EmailPipeline = {
         return;
       }
 
+      // STEP 3.5: Check sync_start_date — ignore emails before configured date
+      if (account.sync_start_date) {
+        const syncDate = new Date(account.sync_start_date);
+        const emailDate = new Date(email.date || event.received_at);
+        if (emailDate < syncDate) {
+          await EmailEventRepo.setStatus(event.id, 'IGNORADO');
+          logger.info(`[Pipeline] IGNORADO (antes de sync_start_date) id=${event.id}`);
+          return;
+        }
+      }
+
       // STEP 4: Bitrix integration (Req 7.3)
       await EmailEventRepo.setStatus(event.id, 'PROCESSANDO');
       await this._processInBitrix(account, email, event);
@@ -78,6 +89,7 @@ export const EmailPipeline = {
       auth_id: account.auth_id,
       refresh_id: account.refresh_id,
       field_mapping: account.field_mapping,
+      deal_mode: account.deal_mode,
     };
 
     const apiLog = {};

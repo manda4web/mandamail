@@ -43,7 +43,9 @@ export async function findAllActive() {
        t.ignore_subject,
        t.auth_id,
        t.refresh_id,
-       t.field_mapping
+       t.field_mapping,
+       t.deal_mode,
+       t.sync_start_date
      FROM imap_accounts ia
      JOIN tenants t ON t.id = ia.tenant_id
      WHERE ia.active = true AND t.active = true`
@@ -70,7 +72,9 @@ export async function findById(id) {
        t.ignore_subject,
        t.auth_id,
        t.refresh_id,
-       t.field_mapping
+       t.field_mapping,
+       t.deal_mode,
+       t.sync_start_date
      FROM imap_accounts ia
      JOIN tenants t ON t.id = ia.tenant_id
      WHERE ia.id = $1`,

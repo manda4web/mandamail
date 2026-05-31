@@ -82,6 +82,8 @@ export async function update(id, data) {
     'application_token',
     'member_id',
     'auth_expires_at',
+    'deal_mode',
+    'sync_start_date',
   ];
 
   const setClauses = [];
