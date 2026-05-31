@@ -123,8 +123,8 @@ export default async function eventsRoutes(fastify) {
       return reply.code(400).send({ error: 'Only events with ERRO or FALHA_DEFINITIVA status can be reprocessed' });
     }
 
-    const { default: ImapAccountRepo } = await import('../../db/repos/ImapAccountRepo.js');
-    const account = await ImapAccountRepo.findById(event.imap_account_id);
+    const ImapAccountRepoModule = await import('../../db/repos/ImapAccountRepo.js');
+    const account = await ImapAccountRepoModule.findById(event.imap_account_id);
     if (!account) return reply.code(400).send({ error: 'IMAP account not found' });
 
     // Reset status to allow reprocessing
