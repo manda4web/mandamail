@@ -48,6 +48,7 @@ export function buildApp() {
     contentSecurityPolicy: false, // Disabled because app is served in Bitrix iframe
     crossOriginEmbedderPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
+    frameguard: false, // Allow embedding in Bitrix24 iframe
   });
 
   // Support application/x-www-form-urlencoded (Bitrix24 sends POST with this content-type)
