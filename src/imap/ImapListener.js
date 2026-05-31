@@ -123,22 +123,23 @@ export class ImapListener {
         }
 
         for (const msg of messages) {
+          // Mark as seen IMMEDIATELY to prevent reprocessing loops
+          try {
+            await this.client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
+          } catch (flagErr) {
+            logger.warn(`[IMAP][${this.account.email}] failed to mark message as seen: ${flagErr.message}`);
+          }
+
           try {
             // Skip emails larger than 20MB to prevent memory issues
             if (msg.source && msg.source.length > 20_000_000) {
-              logger.warn(`[IMAP][${this.account.email}] skipping oversized message (${Math.round(msg.source.length / 1024 / 1024)}MB), marking as seen`);
-              await this.client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
+              logger.warn(`[IMAP][${this.account.email}] skipping oversized message (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
               continue;
             }
             const parsed = await simpleParser(msg.source);
             await EmailPipeline.process(this.account, parsed);
-            await this.client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
           } catch (err) {
             logger.error(`[IMAP][${this.account.email}] error processing message: ${err.message}`);
-            // Mark as seen to prevent infinite retry loop on problematic emails
-            try {
-              await this.client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
-            } catch {}
           }
         }
       } finally {
