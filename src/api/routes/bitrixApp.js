@@ -58,8 +58,24 @@ function buildInstallHtml() {
     <h1>MandaMail instalado!</h1>
     <p>O app foi instalado com sucesso no seu Bitrix24.<br>Acesse o app para configurar suas contas de email.</p>
     <button class="btn" onclick="BX24.installFinish()">Concluir instalação</button>
+    <p style="margin-top:16px;font-size:12px;color:#9ca3af" id="countdown">Redirecionando em 3 segundos...</p>
   </div>
-  <script>BX24.init(function() { BX24.fitWindow(); });</script>
+  <script>
+    BX24.init(function() {
+      BX24.fitWindow();
+      var seconds = 3;
+      var el = document.getElementById('countdown');
+      var timer = setInterval(function() {
+        seconds--;
+        if (seconds <= 0) {
+          clearInterval(timer);
+          BX24.installFinish();
+        } else {
+          el.textContent = 'Redirecionando em ' + seconds + ' segundos...';
+        }
+      }, 1000);
+    });
+  </script>
 </body>
 </html>`;
 }
