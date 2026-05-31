@@ -138,7 +138,7 @@ export const ActivityWriter = {
           }
 
           if (downloadUrl) {
-            body = body.replace(placeholder, `<img src="${downloadUrl}" style="max-width:100%">`);
+            body = body.replace(placeholder, `<img src="${downloadUrl}" style="max-width:600px; width:100%; height:auto;">`);
             replaced = true;
             logger.info({ image: img.name, url: downloadUrl }, '[ActivityWriter] Uploaded data URI image');
           } else {
@@ -171,7 +171,7 @@ export const ActivityWriter = {
 
           if (downloadUrl) {
             const escaped = img.cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            body = body.replace(new RegExp(`(src=["'])cid:${escaped}(["'])`, 'gi'), `$1${downloadUrl}$2`);
+            body = body.replace(new RegExp(`<img[^>]*src=["']cid:${escaped}["'][^>]*/?>`, 'gi'), `<img src="${downloadUrl}" style="max-width:600px; width:100%; height:auto;">`);
             logger.info({ image: img.fileName, cid: img.cid, url: downloadUrl }, '[ActivityWriter] Uploaded CID image');
           }
         } catch (err) {
