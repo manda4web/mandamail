@@ -83,9 +83,11 @@ export const ActivityWriter = {
 
     // Extract data URI images from HTML
     if (email.bodyHtml && body.includes('data:image')) {
+      logger.info(`[ActivityWriter] Found data:image in body (${body.length} chars), extracting...`);
       const extracted = extractDataUriImages(body);
       body = extracted.html;
       inlineImages = extracted.images;
+      logger.info(`[ActivityWriter] Extracted ${inlineImages.length} inline image(s)`);
     }
 
     // Upload inline images to Bitrix24 and get URLs
@@ -137,7 +139,9 @@ export const ActivityWriter = {
             if (downloadUrl) {
               body = body.replace(placeholder, `<img src="${downloadUrl}" style="max-width:100%">`);
               replaced = true;
-              logger.info(`[ActivityWriter] Uploaded inline image ${img.name} → ${downloadUrl}`);
+              logger.info({ image: img.name, url: downloadUrl }, '[ActivityWriter] Uploaded inline image');
+            } else {
+              logger.warn({ image: img.name, uploadResult: JSON.stringify(uploaded).substring(0, 200) }, '[ActivityWriter] Upload succeeded but no DOWNLOAD_URL');
             }
           } catch (err) {
             logger.warn(`[ActivityWriter] Upload failed for ${img.name}: ${err.message}`);
