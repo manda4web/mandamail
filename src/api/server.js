@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { authenticate } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
+import bitrixAppRoutes from './routes/bitrixApp.js';
 import { tenantsRoutes } from './routes/tenants.js';
 import imapAccountsRoutes from './routes/imapAccounts.js';
 import eventsRoutes from './routes/events.js';
@@ -22,6 +23,7 @@ export function buildApp() {
 
   // Public routes (no auth required)
   app.register(authRoutes);
+  app.register(bitrixAppRoutes);
 
   // Protected routes (require authentication)
   app.register(async function protectedRoutes(protectedApp) {
