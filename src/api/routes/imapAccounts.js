@@ -190,6 +190,25 @@ export default async function imapAccountsRoutes(fastify) {
    */
   fastify.patch('/tenants/:id/imap-accounts/:accountId', {
     preHandler: [requireTenantAccess],
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          email: { type: 'string' },
+          host: { type: 'string' },
+          username: { type: 'string' },
+          password: { type: 'string' },
+          label: { type: 'string' },
+          port: { type: 'integer', minimum: 1, maximum: 65535 },
+          use_ssl: { type: 'boolean' },
+          mailbox: { type: 'string' },
+          poll_mode: { type: 'string', enum: ['idle', 'poll'] },
+          poll_interval_sec: { type: 'integer', minimum: 30, maximum: 3600 },
+          active: { type: 'boolean' },
+        },
+        additionalProperties: false,
+      },
+    },
   }, async (request, reply) => {
     const { accountId } = request.params;
     const data = request.body || {};

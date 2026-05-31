@@ -1,4 +1,7 @@
 import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
+import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import { authenticate } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import bitrixAppRoutes from './routes/bitrixApp.js';
@@ -8,9 +11,7 @@ import eventsRoutes from './routes/events.js';
 
 /**
  * Creates and configures the Fastify application instance.
- * Registers all route plugins with appropriate authentication:
- * - /auth/* routes are public (no auth required)
- * - All other routes require JWT authentication via preHandler hook
+ * Includes security middleware: rate limiting, CORS, security headers.
  *
  * @returns {import('fastify').FastifyInstance} Configured Fastify instance (not yet listening)
  */
@@ -19,6 +20,34 @@ export function buildApp() {
     logger: {
       level: process.env.LOG_LEVEL || 'info',
     },
+    // Limit body size to 25MB (for emails with large inline images)
+    bodyLimit: 25 * 1024 * 1024,
+  });
+
+  // === SECURITY: Rate Limiting ===
+  app.register(rateLimit, {
+    max: 100, // 100 requests per minute per IP
+    timeWindow: '1 minute',
+    // Stricter limit for auth endpoints
+    keyGenerator: (request) => request.ip,
+  });
+
+  // === SECURITY: CORS ===
+  app.register(cors, {
+    origin: [
+      /\.bitrix24\.com\.br$/,
+      /\.bitrix24\.com$/,
+      /mandamail\.manda4\.com\.br$/,
+    ],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    credentials: true,
+  });
+
+  // === SECURITY: Headers (helmet) ===
+  app.register(helmet, {
+    contentSecurityPolicy: false, // Disabled because app is served in Bitrix iframe
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
   });
 
   // Support application/x-www-form-urlencoded (Bitrix24 sends POST with this content-type)
@@ -47,10 +76,9 @@ export function buildApp() {
   app.setErrorHandler((error, request, reply) => {
     const statusCode = error.statusCode || 500;
 
-    // Log server errors at error level, client errors at warn level
     if (statusCode >= 500) {
       request.log.error({ err: error }, 'Internal server error');
-    } else {
+    } else if (statusCode !== 429) { // Don't log rate limit hits
       request.log.warn({ err: error }, 'Client error');
     }
 

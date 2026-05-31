@@ -11,6 +11,12 @@ import logger from '../../logger.js';
  */
 export default async function authRoutes(fastify) {
   fastify.post('/auth/login', {
+    config: {
+      rateLimit: {
+        max: 5, // 5 attempts per minute per IP
+        timeWindow: '1 minute',
+      },
+    },
     schema: {
       body: {
         type: 'object',
@@ -68,6 +74,13 @@ export default async function authRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { domain, member_id, auth_id, refresh_id, server_endpoint, application_token, auth_expires } = request.body;
+
+    // Validate application_token if configured (prevents forged auth requests)
+    const expectedToken = process.env.BITRIX_APP_TOKEN;
+    if (expectedToken && application_token && application_token !== expectedToken) {
+      logger.warn({ domain, member_id }, 'Invalid application_token in /auth/bitrix');
+      return reply.code(403).send({ error: 'Invalid application token' });
+    }
 
     const bitrixUrl = 'https://' + domain;
 
