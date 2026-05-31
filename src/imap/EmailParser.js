@@ -192,8 +192,11 @@ export function parseRaw(parsed) {
   let bodyHtml = parsed.html || null;
   if (bodyHtml) {
     bodyHtml = cleanHtml(bodyHtml, rawAttachments);
-    // Do NOT truncate here — ActivityWriter will handle large bodies
-    // The data URIs will be extracted and replaced with URLs before sending to Bitrix
+    // Note: bodyHtml is NOT truncated here — ActivityWriter extracts images first
+    // Cap at 25MB to prevent memory issues
+    if (bodyHtml.length > 25_000_000) {
+      bodyHtml = bodyHtml.substring(0, 25_000_000);
+    }
   }
 
   // Text body: use parsed.text or convert from HTML

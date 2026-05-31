@@ -20,6 +20,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
 ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=1024"
 EXPOSE 3000
 
 CMD ["node", "src/index.js"]
