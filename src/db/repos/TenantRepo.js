@@ -85,7 +85,12 @@ export async function update(id, data) {
   for (const field of allowedFields) {
     if (data[field] !== undefined) {
       setClauses.push(`${field} = $${paramIndex}`);
-      values.push(data[field]);
+      // JSONB fields need to be stringified
+      if (field === 'field_mapping') {
+        values.push(JSON.stringify(data[field]));
+      } else {
+        values.push(data[field]);
+      }
       paramIndex++;
     }
   }
