@@ -907,66 +907,58 @@ function buildAppHtml(bitrixData) {
     document.addEventListener('DOMContentLoaded', function() {
       // If we have Bitrix data from POST, auto-authenticate immediately
       if (BX_DOMAIN && BX_MEMBER_ID) {
-        fetch('/auth/bitrix', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            domain: BX_DOMAIN,
-            member_id: BX_MEMBER_ID,
-            auth_id: BX_AUTH_ID
-          })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          if (data.token) {
-            setToken(data.token);
-            if (data.tenant_id) currentTenantId = data.tenant_id;
-            showApp();
-          } else {
-            tryBX24Auth();
-          }
-        })
-        .catch(function() { tryBX24Auth(); });
+        autoAuth(BX_DOMAIN, BX_MEMBER_ID, BX_AUTH_ID);
         return;
       }
 
-      // Fallback: try BX24 JS SDK
-      tryBX24Auth();
-    });
-
-    function tryBX24Auth() {
+      // Try BX24 JS SDK
       try {
         BX24.init(function() {
           BX24.fitWindow();
+          // Try getAuth first
           var auth = BX24.getAuth();
           if (auth && auth.domain) {
-            fetch('/auth/bitrix', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                domain: auth.domain,
-                member_id: auth.member_id || 'default',
-                auth_id: auth.access_token || ''
-              })
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-              if (data.token) {
-                setToken(data.token);
-                if (data.tenant_id) currentTenantId = data.tenant_id;
-                showApp();
-              } else {
-                fallbackLogin();
-              }
-            })
-            .catch(function() { fallbackLogin(); });
-          } else {
-            fallbackLogin();
+            autoAuth(auth.domain, auth.member_id || 'user', auth.access_token || '');
+            return;
           }
+          // Try getting domain from BX24.getDomain()
+          var domain = '';
+          try { domain = BX24.getDomain(); } catch(e) {}
+          if (domain) {
+            autoAuth(domain, 'user', '');
+            return;
+          }
+          // Last resort: check URL params (some Bitrix versions pass via query)
+          var params = new URLSearchParams(window.location.search);
+          var qDomain = params.get('DOMAIN') || params.get('domain');
+          if (qDomain) {
+            autoAuth(qDomain, params.get('member_id') || 'user', params.get('AUTH_ID') || '');
+            return;
+          }
+          fallbackLogin();
         });
       } catch(e) {
         fallbackLogin();
       }
+    });
+
+    function autoAuth(domain, memberId, authId) {
+      fetch('/auth/bitrix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: domain, member_id: memberId || 'user', auth_id: authId || '' })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.token) {
+          setToken(data.token);
+          if (data.tenant_id) currentTenantId = data.tenant_id;
+          showApp();
+        } else {
+          fallbackLogin();
+        }
+      })
+      .catch(function() { fallbackLogin(); });
     }
 
     function fallbackLogin() {
