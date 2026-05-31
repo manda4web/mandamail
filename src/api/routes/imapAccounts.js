@@ -139,4 +139,79 @@ export default async function imapAccountsRoutes(fastify) {
 
     return reply.code(204).send();
   });
+
+  /**
+   * POST /tenants/:id/imap-accounts/:accountId/test
+   * Test IMAP connection using stored credentials (decrypted from DB).
+   */
+  fastify.post('/tenants/:id/imap-accounts/:accountId/test', {
+    preHandler: [requireTenantAccess],
+  }, async (request, reply) => {
+    const { accountId } = request.params;
+
+    const account = await ImapAccountRepo.findById(accountId);
+    if (!account) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
+
+    const { ImapFlow } = await import('imapflow');
+    let imapClient;
+    try {
+      imapClient = new ImapFlow({
+        host: account.host,
+        port: account.port || 993,
+        secure: account.use_ssl !== false,
+        auth: { user: account.username, pass: account.password },
+        logger: false,
+        greetTimeout: 15000,
+        socketTimeout: 15000,
+      });
+
+      await imapClient.connect();
+      const lock = await imapClient.getMailboxLock(account.mailbox || 'INBOX');
+      const messageCount = imapClient.mailbox.exists;
+      lock.release();
+      await imapClient.logout();
+
+      return { success: true, messageCount, host: account.host };
+    } catch (err) {
+      logger.error({ accountId, error: err.message }, 'IMAP test failed');
+      return reply.code(502).send({ success: false, error: err.message });
+    } finally {
+      if (imapClient) {
+        try { await imapClient.logout(); } catch {}
+      }
+    }
+  });
+
+  /**
+   * PATCH /tenants/:id/imap-accounts/:accountId
+   * Update IMAP account fields (host, port, password, label, etc.)
+   */
+  fastify.patch('/tenants/:id/imap-accounts/:accountId', {
+    preHandler: [requireTenantAccess],
+  }, async (request, reply) => {
+    const { accountId } = request.params;
+    const data = request.body || {};
+
+    const existing = await ImapAccountRepo.findById(accountId);
+    if (!existing) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
+
+    const updated = await ImapAccountRepo.update(accountId, data);
+
+    // Restart worker if connection settings changed
+    if (data.host || data.port || data.password || data.username || data.use_ssl !== undefined) {
+      await TenantScheduler.stopAccount(accountId);
+      const refreshed = await ImapAccountRepo.findById(accountId);
+      if (refreshed && refreshed.active) {
+        await TenantScheduler.startAccount(refreshed);
+      }
+    }
+
+    // Remove password from response
+    const { password, ...safe } = updated || {};
+    return safe;
+  });
 }
