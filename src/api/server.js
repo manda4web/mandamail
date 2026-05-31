@@ -26,10 +26,13 @@ export function buildApp() {
 
   // === SECURITY: Rate Limiting ===
   app.register(rateLimit, {
-    max: 100, // 100 requests per minute per IP
+    max: 200, // 200 requests per minute per IP
     timeWindow: '1 minute',
-    // Stricter limit for auth endpoints
     keyGenerator: (request) => request.ip,
+    // Don't rate limit Bitrix app routes (they make multiple requests on load)
+    allowList: (request) => {
+      return request.url.startsWith('/bitrix/') || request.url.startsWith('/auth/bitrix');
+    },
   });
 
   // === SECURITY: CORS ===
