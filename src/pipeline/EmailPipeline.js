@@ -1,6 +1,7 @@
 import { EmailEventRepo } from '../db/repos/EmailEventRepo.js';
 import { BitrixResultRepo } from '../db/repos/BitrixResultRepo.js';
 import { RetryJobRepo } from '../db/repos/RetryJobRepo.js';
+import { db } from '../db/client.js';
 import { DedupEngine } from './DedupEngine.js';
 import { FilterEngine } from './FilterEngine.js';
 import { parseRaw } from '../imap/EmailParser.js';
@@ -132,6 +133,10 @@ export const EmailPipeline = {
 
     // Mark success (Req 12)
     await EmailEventRepo.setStatus(event.id, 'SUCESSO');
+
+    // Delete old bitrix_result if exists (for reprocessing)
+    await db.query('DELETE FROM bitrix_results WHERE email_event_id = $1', [event.id]);
+
     await BitrixResultRepo.create({
       email_event_id: event.id,
       tenant_id: account.tenant_id,
