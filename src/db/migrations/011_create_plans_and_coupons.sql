@@ -48,5 +48,5 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 );
 
 -- Index for tenant subscription lookup
-CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant ON subscriptions (tenant_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_tenant_unique ON subscriptions (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_coupons_code ON coupons (code);

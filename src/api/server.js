@@ -6,6 +6,7 @@ import { authenticate } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import bitrixAppRoutes from './routes/bitrixApp.js';
 import adminRoutes from './routes/admin.js';
+import stripeRoutes from './routes/stripe.js';
 import { tenantsRoutes } from './routes/tenants.js';
 import imapAccountsRoutes from './routes/imapAccounts.js';
 import eventsRoutes from './routes/events.js';
@@ -23,6 +24,21 @@ export function buildApp() {
     },
     // Limit body size to 25MB (for emails with large inline images)
     bodyLimit: 25 * 1024 * 1024,
+  });
+
+  // Store raw body for Stripe webhook signature verification
+  app.addHook('preParsing', async (request, reply, payload) => {
+    if (request.url.startsWith('/stripe/webhook')) {
+      const chunks = [];
+      for await (const chunk of payload) {
+        chunks.push(chunk);
+      }
+      request.rawBody = Buffer.concat(chunks).toString('utf8');
+      // Return a new readable stream from the raw body
+      const { Readable } = await import('node:stream');
+      return Readable.from([request.rawBody]);
+    }
+    return payload;
   });
 
   // === SECURITY: Rate Limiting ===
@@ -64,6 +80,7 @@ export function buildApp() {
   // Public routes (no auth required)
   app.register(authRoutes);
   app.register(bitrixAppRoutes);
+  app.register(stripeRoutes); // Stripe webhook is public (verified by signature)
 
   // Protected routes (require authentication)
   app.register(async function protectedRoutes(protectedApp) {
