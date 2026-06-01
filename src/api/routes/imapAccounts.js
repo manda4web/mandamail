@@ -139,8 +139,9 @@ export default async function imapAccountsRoutes(fastify) {
     // Stop the worker first
     await TenantScheduler.stopAccount(accountId);
 
-    // Deactivate the account in the database
-    await ImapAccountRepo.setActive(accountId, false);
+    // Delete the account from the database
+    const { db } = await import('../../db/client.js');
+    await db.query('DELETE FROM imap_accounts WHERE id = $1', [accountId]);
 
     return reply.code(204).send();
   });
