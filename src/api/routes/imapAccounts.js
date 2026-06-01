@@ -139,8 +139,11 @@ export default async function imapAccountsRoutes(fastify) {
     // Stop the worker first
     await TenantScheduler.stopAccount(accountId);
 
-    // Delete the account from the database
+    // Delete related data then the account
     const { db } = await import('../../db/client.js');
+    await db.query('DELETE FROM retry_jobs WHERE email_event_id IN (SELECT id FROM email_events WHERE imap_account_id = $1)', [accountId]);
+    await db.query('DELETE FROM bitrix_results WHERE email_event_id IN (SELECT id FROM email_events WHERE imap_account_id = $1)', [accountId]);
+    await db.query('DELETE FROM email_events WHERE imap_account_id = $1', [accountId]);
     await db.query('DELETE FROM imap_accounts WHERE id = $1', [accountId]);
 
     return reply.code(204).send();
