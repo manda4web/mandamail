@@ -5,6 +5,7 @@ import helmet from '@fastify/helmet';
 import { authenticate } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import bitrixAppRoutes from './routes/bitrixApp.js';
+import adminRoutes from './routes/admin.js';
 import { tenantsRoutes } from './routes/tenants.js';
 import imapAccountsRoutes from './routes/imapAccounts.js';
 import eventsRoutes from './routes/events.js';
@@ -70,6 +71,7 @@ export function buildApp() {
     protectedApp.register(tenantsRoutes);
     protectedApp.register(imapAccountsRoutes);
     protectedApp.register(eventsRoutes);
+    protectedApp.register(adminRoutes);
   });
 
   // Global error handler — returns structured JSON errors
