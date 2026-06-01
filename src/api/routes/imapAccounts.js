@@ -19,10 +19,15 @@ export default async function imapAccountsRoutes(fastify) {
   }, async (request, reply) => {
     const { id: tenantId } = request.params;
 
-    const accounts = await ImapAccountRepo.findAllActiveByTenant(tenantId);
+    // Show ALL accounts (active and paused)
+    const { db } = await import('../../db/client.js');
+    const { rows } = await db.query(
+      'SELECT * FROM imap_accounts WHERE tenant_id = $1 ORDER BY created_at',
+      [tenantId]
+    );
 
     // Remove password from each account in the response
-    const sanitized = accounts.map(({ password, ...rest }) => rest);
+    const sanitized = rows.map(({ password_enc, ...rest }) => rest);
 
     return reply.send(sanitized);
   });
