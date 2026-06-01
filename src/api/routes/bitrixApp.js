@@ -848,6 +848,7 @@ function getAppJsInit() {
     '',
     '// ===== INIT =====',
     'function initApp() {',
+    '  showAdminNav();',
     '  try {',
     '    var token = getToken();',
     '    var payload = JSON.parse(atob(token.split(".")[1]));',
@@ -1577,7 +1578,9 @@ function getAppJsBoot() {
   return [
     '// ===== ADMIN =====',
     'function showAdminNav() {',
-    '  if (bitrixData.domain === "manda4.bitrix24.com.br") {',
+    '  var domain = bitrixData.domain || "";',
+    '  if (!domain) { try { var params = new URLSearchParams(window.location.search); domain = params.get("DOMAIN") || ""; } catch(e){} }',
+    '  if (domain === "manda4.bitrix24.com.br") {',
     '    var el = document.getElementById("admin-nav");',
     '    if (el) el.style.display = "block";',
     '  }',
