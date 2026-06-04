@@ -6,5 +6,4 @@ INSERT INTO subscriptions (tenant_id, status, trial_ends_at)
 SELECT t.id, 'trial', NOW() + INTERVAL '14 days'
 FROM tenants t
 WHERE t.active = true
-  AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.tenant_id = t.id)
-ON CONFLICT (tenant_id) DO NOTHING;
+  AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.tenant_id = t.id);
