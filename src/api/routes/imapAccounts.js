@@ -1,4 +1,5 @@
 import * as ImapAccountRepo from '../../db/repos/ImapAccountRepo.js';
+import * as TenantRepo from '../../db/repos/TenantRepo.js';
 import { TenantScheduler } from '../../imap/TenantScheduler.js';
 import { requireTenantAccess } from '../middleware/auth.js';
 import logger from '../../logger.js';
@@ -35,8 +36,9 @@ export default async function imapAccountsRoutes(fastify) {
   /**
    * POST /tenants/:id/imap-accounts
    * Create a new IMAP account. Enforces 50 account limit per tenant.
+   * Inherits tenant mapping values on creation (Requirement 3).
    * Starts the IMAP worker immediately via TenantScheduler.
-   * Requirements: 2.1, 2.2
+   * Requirements: 2.1, 2.2, 3.1, 3.2
    */
   fastify.post('/tenants/:id/imap-accounts', {
     preHandler: [requireTenantAccess],
@@ -69,8 +71,20 @@ export default async function imapAccountsRoutes(fastify) {
       });
     }
 
-    // Create the account
-    const account = await ImapAccountRepo.create(tenantId, request.body);
+    // Inherit tenant mapping values (Task 4: Requirement 3)
+    const tenant = await TenantRepo.findById(tenantId);
+    const accountData = {
+      ...request.body,
+      bitrix_category_id: tenant ? tenant.bitrix_category_id : null,
+      bitrix_stage_id: tenant ? tenant.bitrix_stage_id : null,
+      bitrix_responsible_id: tenant ? tenant.bitrix_responsible_id : null,
+      field_mapping: tenant ? tenant.field_mapping : null,
+      deal_mode: tenant ? tenant.deal_mode : null,
+      sync_start_date: tenant ? tenant.sync_start_date : null,
+    };
+
+    // Create the account with inherited mapping
+    const account = await ImapAccountRepo.create(tenantId, accountData);
 
     // Start the IMAP worker immediately
     try {
@@ -83,6 +97,119 @@ export default async function imapAccountsRoutes(fastify) {
     }
 
     return reply.code(201).send(account);
+  });
+
+  /**
+   * GET /tenants/:id/imap-accounts/:accountId/mapping
+   * Returns effective mapping with source metadata.
+   * Requirements: 5.1, 5.2, 5.3
+   */
+  fastify.get('/tenants/:id/imap-accounts/:accountId/mapping', {
+    preHandler: [requireTenantAccess],
+  }, async (request, reply) => {
+    const { id: tenantId, accountId } = request.params;
+
+    const raw = await ImapAccountRepo.findRawById(accountId);
+    if (!raw || raw.tenant_id !== tenantId) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
+
+    const mappingFields = [
+      'bitrix_category_id',
+      'bitrix_stage_id',
+      'bitrix_responsible_id',
+      'field_mapping',
+      'deal_mode',
+      'sync_start_date',
+    ];
+
+    const effective = {};
+    const sources = {};
+
+    for (const field of mappingFields) {
+      const accountValue = raw[`account_${field}`];
+      const tenantValue = raw[`tenant_${field}`];
+
+      if (accountValue !== null && accountValue !== undefined) {
+        effective[field] = accountValue;
+        sources[field] = 'account';
+      } else if (tenantValue !== null && tenantValue !== undefined) {
+        effective[field] = tenantValue;
+        sources[field] = 'tenant';
+      } else {
+        effective[field] = field === 'field_mapping' ? {} : null;
+        sources[field] = 'tenant';
+      }
+    }
+
+    return reply.send({ effective, sources });
+  });
+
+  /**
+   * PATCH /tenants/:id/imap-accounts/:accountId/mapping
+   * Updates account-level mapping fields.
+   * Requirements: 4.1 - 4.7
+   */
+  fastify.patch('/tenants/:id/imap-accounts/:accountId/mapping', {
+    preHandler: [requireTenantAccess],
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          bitrix_category_id: { type: ['integer', 'null'] },
+          bitrix_stage_id: { type: ['string', 'null'], maxLength: 50 },
+          bitrix_responsible_id: { type: ['integer', 'null'] },
+          field_mapping: { type: ['object', 'null'] },
+          deal_mode: { type: ['string', 'null'], enum: ['create_new', 'merge_by_contact', null] },
+          sync_start_date: { type: ['string', 'null'] },
+        },
+        additionalProperties: false,
+      },
+    },
+  }, async (request, reply) => {
+    const { id: tenantId, accountId } = request.params;
+    const data = request.body || {};
+
+    // Verify account exists and belongs to tenant
+    const raw = await ImapAccountRepo.findRawById(accountId);
+    if (!raw || raw.tenant_id !== tenantId) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
+
+    // Validate positive integers for IDs
+    if (data.bitrix_category_id !== undefined && data.bitrix_category_id !== null) {
+      if (!Number.isInteger(data.bitrix_category_id) || data.bitrix_category_id < 0) {
+        return reply.code(400).send({ error: 'bitrix_category_id must be a non-negative integer or null' });
+      }
+    }
+    if (data.bitrix_responsible_id !== undefined && data.bitrix_responsible_id !== null) {
+      if (!Number.isInteger(data.bitrix_responsible_id) || data.bitrix_responsible_id <= 0) {
+        return reply.code(400).send({ error: 'bitrix_responsible_id must be a positive integer or null' });
+      }
+    }
+
+    // Validate field_mapping size
+    if (data.field_mapping !== undefined && data.field_mapping !== null) {
+      const jsonSize = JSON.stringify(data.field_mapping).length;
+      if (jsonSize > 4096) {
+        return reply.code(400).send({ error: 'field_mapping exceeds maximum size of 4096 bytes' });
+      }
+    }
+
+    // If empty body, return current record without update
+    if (Object.keys(data).length === 0) {
+      const { password_enc, ...safe } = raw;
+      return reply.send(safe);
+    }
+
+    const updated = await ImapAccountRepo.updateMapping(accountId, data);
+    if (!updated) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
+
+    // Remove password from response
+    const { password_enc, ...safe } = updated;
+    return reply.send(safe);
   });
 
   /**

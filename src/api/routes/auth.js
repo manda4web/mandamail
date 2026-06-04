@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { UserRepo } from '../../db/repos/UserRepo.js';
 import * as TenantRepo from '../../db/repos/TenantRepo.js';
+import { SubscriptionRepo } from '../../db/repos/SubscriptionRepo.js';
 import logger from '../../logger.js';
 
 /**
@@ -95,6 +96,10 @@ export default async function authRoutes(fastify) {
         bitrix_responsible_id: null,
         member_id: member_id,
       });
+
+      // Create trial subscription for new tenant (14 days)
+      await SubscriptionRepo.createTrial(tenant.id);
+      logger.info({ tenant_id: tenant.id }, 'Trial subscription created (14 days)');
     }
 
     // Update OAuth tokens if provided

@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { db } from '../../db/client.js';
+import { TenantScheduler } from '../../imap/TenantScheduler.js';
 import logger from '../../logger.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -147,6 +148,13 @@ export default async function stripeRoutes(fastify) {
             await db.query('UPDATE coupons SET current_uses = current_uses + 1 WHERE id = $1', [coupon_id]);
           }
 
+          // Start IMAP workers for this tenant (subscription now active)
+          try {
+            await TenantScheduler.startTenant(tenant_id);
+          } catch (err) {
+            logger.error(`[Stripe] Failed to start workers for tenant ${tenant_id}: ${err.message}`);
+          }
+
           logger.info({ tenant_id, plan_id }, '[Stripe] Subscription activated');
         }
         break;
@@ -158,19 +166,40 @@ export default async function stripeRoutes(fastify) {
         if (tenantId) {
           const status = sub.status === 'active' ? 'active' : sub.status === 'past_due' ? 'past_due' : sub.status;
           await db.query(
-            'UPDATE subscriptions SET status = $1, updated_at = NOW() WHERE stripe_subscription_id = $2',
-            [status, sub.id]
+            'UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3, updated_at = NOW() WHERE stripe_subscription_id = $4',
+            [status, sub.current_period_start ? new Date(sub.current_period_start * 1000) : null, sub.current_period_end ? new Date(sub.current_period_end * 1000) : null, sub.id]
           );
+
+          // If subscription became active, start workers
+          if (status === 'active') {
+            try {
+              await TenantScheduler.startTenant(tenantId);
+            } catch (err) {
+              logger.error(`[Stripe] Failed to start workers for tenant ${tenantId}: ${err.message}`);
+            }
+          }
+
+          logger.info({ tenant_id: tenantId, status }, '[Stripe] Subscription updated');
         }
         break;
       }
 
       case 'customer.subscription.deleted': {
         const sub = event.data.object;
+        const tenantId = sub.metadata?.tenant_id;
         await db.query(
           'UPDATE subscriptions SET status = $1, canceled_at = NOW(), updated_at = NOW() WHERE stripe_subscription_id = $2',
           ['canceled', sub.id]
         );
+
+        // Stop IMAP workers for this tenant
+        if (tenantId) {
+          try {
+            await TenantScheduler.handleSubscriptionInactive(tenantId, 'canceled');
+          } catch (err) {
+            logger.error(`[Stripe] Failed to stop workers for tenant ${tenantId}: ${err.message}`);
+          }
+        }
         break;
       }
 

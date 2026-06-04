@@ -1,5 +1,6 @@
 import { ImapListener } from './ImapListener.js';
 import * as ImapAccountRepo from '../db/repos/ImapAccountRepo.js';
+import { SubscriptionRepo } from '../db/repos/SubscriptionRepo.js';
 import logger from '../logger.js';
 
 // Map: accountId (uuid) → ImapListener
@@ -8,10 +9,24 @@ const workers = new Map();
 export const TenantScheduler = {
   async startAll() {
     const accounts = await ImapAccountRepo.findAllActive();
-    logger.info(`[Scheduler] starting ${accounts.length} IMAP worker(s)`);
+    logger.info(`[Scheduler] checking subscriptions for ${accounts.length} IMAP account(s)`);
+
+    let started = 0;
+    let skipped = 0;
+
     for (const account of accounts) {
+      // Check if tenant has active subscription before starting worker
+      const access = await SubscriptionRepo.checkAccess(account.tenant_id);
+      if (!access.allowed) {
+        logger.info(`[Scheduler] skipping ${account.email} — plan inactive (${access.reason})`);
+        skipped++;
+        continue;
+      }
       await this.startAccount(account);
+      started++;
     }
+
+    logger.info(`[Scheduler] started ${started} worker(s), skipped ${skipped} (inactive plan)`);
   },
 
   async startAccount(account) {
@@ -48,13 +63,42 @@ export const TenantScheduler = {
   },
 
   async stopTenant(tenantId) {
+    let count = 0;
     for (const [id, worker] of workers.entries()) {
       if (worker.account.tenant_id === tenantId) {
         await worker.stop();
         workers.delete(id);
+        count++;
       }
     }
-    logger.info(`[Scheduler] all workers stopped for tenant ${tenantId}`);
+    logger.info(`[Scheduler] stopped ${count} worker(s) for tenant ${tenantId}`);
+    return count;
+  },
+
+  /**
+   * Called when a subscription is activated — start all IMAP workers for the tenant.
+   */
+  async startTenant(tenantId) {
+    const accounts = await ImapAccountRepo.findAllActive();
+    const tenantAccounts = accounts.filter(a => a.tenant_id === tenantId);
+    let started = 0;
+    for (const account of tenantAccounts) {
+      if (!workers.has(account.id)) {
+        await this.startAccount(account);
+        started++;
+      }
+    }
+    logger.info(`[Scheduler] started ${started} worker(s) for tenant ${tenantId} (subscription activated)`);
+    return started;
+  },
+
+  /**
+   * Called when a subscription is canceled/expired — stop all IMAP workers for the tenant.
+   */
+  async handleSubscriptionInactive(tenantId, reason) {
+    const count = await this.stopTenant(tenantId);
+    logger.warn(`[Scheduler] tenant ${tenantId} plan inactive (${reason}), stopped ${count} worker(s)`);
+    return count;
   },
 
   status() {

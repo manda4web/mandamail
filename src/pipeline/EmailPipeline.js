@@ -1,6 +1,7 @@
 import { EmailEventRepo } from '../db/repos/EmailEventRepo.js';
 import { BitrixResultRepo } from '../db/repos/BitrixResultRepo.js';
 import { RetryJobRepo } from '../db/repos/RetryJobRepo.js';
+import { SubscriptionRepo } from '../db/repos/SubscriptionRepo.js';
 import { db } from '../db/client.js';
 import { DedupEngine } from './DedupEngine.js';
 import { FilterEngine } from './FilterEngine.js';
@@ -14,6 +15,33 @@ import logger from '../logger.js';
 
 export const EmailPipeline = {
   async process(account, parsedMail) {
+    // STEP 0: Verify active plan before any processing
+    try {
+      const access = await SubscriptionRepo.checkAccess(account.tenant_id);
+      if (!access.allowed) {
+        logger.warn(`[Pipeline][${account.email}] PLANO_INATIVO tenant=${account.tenant_id} reason=${access.reason}`);
+        // Save event with PLANO_INATIVO status (no further processing)
+        const email = parseRaw(parsedMail);
+        await EmailEventRepo.create({
+          tenant_id: account.tenant_id,
+          imap_account_id: account.id,
+          message_id: email.messageId,
+          from_email: email.fromEmail,
+          from_name: email.fromName,
+          subject: email.subject,
+          body_text: email.bodyText,
+          to_emails: email.toEmails,
+          received_at: email.date,
+          status: 'PLANO_INATIVO',
+        });
+        return;
+      }
+    } catch (err) {
+      logger.error(`[Pipeline][${account.email}] Subscription check failed: ${err.message}`);
+      // On DB error, reject and let retry handle it
+      throw err;
+    }
+
     const email = parseRaw(parsedMail);
 
     // STEP 1: Save as RECEBIDO BEFORE any Bitrix call (Req 7.1, 7.2)
@@ -78,7 +106,19 @@ export const EmailPipeline = {
         }
       }
 
-      // STEP 4: Bitrix integration (Req 7.3)
+      // STEP 4: Validate required mapping fields before Bitrix integration
+      if (!account.bitrix_category_id && account.bitrix_category_id !== 0) {
+        logger.error(`[Pipeline] Missing required mapping (bitrix_category_id) for account=${account.id}`);
+        await EmailEventRepo.setStatus(event.id, 'ERRO');
+        return;
+      }
+      if (!account.bitrix_stage_id) {
+        logger.error(`[Pipeline] Missing required mapping (bitrix_stage_id) for account=${account.id}`);
+        await EmailEventRepo.setStatus(event.id, 'ERRO');
+        return;
+      }
+
+      // STEP 5: Bitrix integration (Req 7.3)
       await EmailEventRepo.setStatus(event.id, 'PROCESSANDO');
       await this._processInBitrix(account, email, event);
     } catch (err) {

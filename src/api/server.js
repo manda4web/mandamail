@@ -10,6 +10,7 @@ import stripeRoutes from './routes/stripe.js';
 import { tenantsRoutes } from './routes/tenants.js';
 import imapAccountsRoutes from './routes/imapAccounts.js';
 import eventsRoutes from './routes/events.js';
+import subscriptionRoutes from './routes/subscriptions.js';
 
 /**
  * Creates and configures the Fastify application instance.
@@ -88,6 +89,7 @@ export function buildApp() {
     protectedApp.register(tenantsRoutes);
     protectedApp.register(imapAccountsRoutes);
     protectedApp.register(eventsRoutes);
+    protectedApp.register(subscriptionRoutes);
     protectedApp.register(adminRoutes);
   });
 
