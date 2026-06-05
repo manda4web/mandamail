@@ -5,9 +5,12 @@ import * as TenantRepo from '../../db/repos/TenantRepo.js';
 import { SubscriptionRepo } from '../../db/repos/SubscriptionRepo.js';
 import logger from '../../logger.js';
 
+const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || 'comercial@manda4.com.br';
+
 /**
  * Registers the authentication routes on the Fastify instance.
  * POST /auth/login — public endpoint, no authentication required.
+ * POST /auth/bitrix — auto-authenticate from Bitrix24 iframe with access control.
  * @param {import('fastify').FastifyInstance} fastify
  */
 export default async function authRoutes(fastify) {
@@ -56,7 +59,7 @@ export default async function authRoutes(fastify) {
     return reply.send({ token });
   });
 
-  // POST /auth/bitrix — Auto-authenticate from Bitrix24 iframe
+  // POST /auth/bitrix — Auto-authenticate from Bitrix24 iframe with per-user access control
   fastify.post('/auth/bitrix', {
     schema: {
       body: {
@@ -70,11 +73,17 @@ export default async function authRoutes(fastify) {
           server_endpoint: { type: 'string' },
           application_token: { type: 'string' },
           auth_expires: { type: 'string' },
+          // User-level info from BX24.callMethod("user.current")
+          user_id: { type: 'string' },
+          user_name: { type: 'string' },
+          user_email: { type: 'string' },
+          is_admin: { type: 'boolean' },
         },
       },
     },
   }, async (request, reply) => {
     const { domain, member_id, auth_id, refresh_id, server_endpoint, application_token, auth_expires } = request.body;
+    const { user_id: bitrixUserId, user_name: userName, user_email: userEmail, is_admin: isBitrixAdmin } = request.body;
 
     // Validate application_token if configured (prevents forged auth requests)
     const expectedToken = process.env.BITRIX_APP_TOKEN;
@@ -115,21 +124,105 @@ export default async function authRoutes(fastify) {
       logger.info({ tenant_id: tenant.id, domain }, 'OAuth tokens updated');
     }
 
-    // Find or create user for this portal member
-    const userEmail = member_id + '@' + domain;
-    let user = await UserRepo.findByEmail(userEmail);
+    // Determine user identity — prefer Bitrix user_id, fallback to member_id
+    const effectiveEmail = userEmail || (member_id + '@' + domain);
+    const effectiveBitrixUserId = bitrixUserId || null;
+    const effectiveDisplayName = userName || null;
+    const effectiveIsBitrixAdmin = isBitrixAdmin === true;
+
+    // Check if this is the super-admin email
+    const isSuperAdmin = effectiveEmail.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+
+    // Find existing user by Bitrix user ID + tenant, or by email
+    let user = null;
+    if (effectiveBitrixUserId) {
+      user = await UserRepo.findByBitrixUserIdAndTenant(effectiveBitrixUserId, tenant.id);
+    }
     if (!user) {
-      logger.info({ userEmail, tenant_id: tenant.id }, 'Auto-creating user from Bitrix24');
-      const hash = await bcrypt.hash(member_id, 10);
-      user = await UserRepo.create({ email: userEmail, password_hash: hash, role: 'tenant_user' });
-      await UserRepo.addTenantAccess(user.id, tenant.id, 'owner');
+      user = await UserRepo.findByEmail(effectiveEmail);
     }
 
-    // Issue JWT with tenant_id included
-    const tokenPayload = { id: user.id, email: user.email, role: user.role, tenant_id: tenant.id };
+    // If user doesn't exist yet, we need to decide if they get access
+    if (!user) {
+      // Access is granted if: super-admin, Bitrix admin, or portal is brand new (first user = owner)
+      const existingUsers = await UserRepo.findUsersByTenant(tenant.id);
+      const isFirstUser = existingUsers.length === 0;
+
+      if (!isSuperAdmin && !effectiveIsBitrixAdmin && !isFirstUser) {
+        // Check if there's a pre-granted entry (admin manually added this user by email/bitrix_id)
+        // Since user doesn't exist yet, they have no access
+        logger.warn({ effectiveEmail, domain, bitrixUserId: effectiveBitrixUserId }, 'Access denied - user not authorized');
+        return reply.code(403).send({
+          error: 'ACCESS_DENIED',
+          message: 'Você não tem permissão para acessar este aplicativo. Solicite acesso ao administrador do portal.',
+        });
+      }
+
+      // Create the user
+      const hash = await bcrypt.hash(member_id + (effectiveBitrixUserId || ''), 10);
+      user = await UserRepo.create({
+        email: effectiveEmail,
+        password_hash: hash,
+        role: 'tenant_user',
+        bitrix_user_id: effectiveBitrixUserId,
+        display_name: effectiveDisplayName,
+        is_bitrix_admin: effectiveIsBitrixAdmin,
+      });
+
+      // Grant access with appropriate role
+      const grantAdmin = isSuperAdmin || effectiveIsBitrixAdmin || isFirstUser;
+      await UserRepo.addTenantAccess(user.id, tenant.id, isFirstUser ? 'owner' : 'viewer', { is_admin: grantAdmin });
+      logger.info({ userEmail: effectiveEmail, tenant_id: tenant.id, is_admin: grantAdmin }, 'Auto-created user with access');
+    } else {
+      // User exists — update Bitrix info
+      await UserRepo.updateBitrixInfo(user.id, {
+        bitrix_user_id: effectiveBitrixUserId || user.bitrix_user_id,
+        display_name: effectiveDisplayName || user.display_name,
+        is_bitrix_admin: effectiveIsBitrixAdmin,
+      });
+
+      // Ensure user has access to this tenant
+      const hasAccess = await UserRepo.hasAccessToTenant(user.id, tenant.id);
+
+      if (!hasAccess) {
+        // User exists but doesn't have access to this specific tenant
+        if (isSuperAdmin || effectiveIsBitrixAdmin) {
+          // Auto-grant for super-admin and Bitrix admins
+          await UserRepo.addTenantAccess(user.id, tenant.id, 'viewer', { is_admin: true });
+          logger.info({ userEmail: effectiveEmail, tenant_id: tenant.id }, 'Auto-granted access to admin user');
+        } else {
+          logger.warn({ effectiveEmail, domain }, 'Access denied - user exists but no tenant access');
+          return reply.code(403).send({
+            error: 'ACCESS_DENIED',
+            message: 'Você não tem permissão para acessar este aplicativo. Solicite acesso ao administrador do portal.',
+          });
+        }
+      } else {
+        // If user is Bitrix admin and wasn't already marked as admin in user_tenants, promote them
+        if (effectiveIsBitrixAdmin) {
+          const isAlreadyAdmin = await UserRepo.isAdminOfTenant(user.id, tenant.id);
+          if (!isAlreadyAdmin) {
+            await UserRepo.updateTenantRole(user.id, tenant.id, true);
+          }
+        }
+      }
+    }
+
+    // Determine if user is tenant admin for JWT
+    const isAdmin = isSuperAdmin || await UserRepo.isAdminOfTenant(user.id, tenant.id);
+
+    // Issue JWT with tenant_id and admin status included
+    const tokenPayload = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      tenant_id: tenant.id,
+      is_admin: isAdmin,
+      is_super_admin: isSuperAdmin,
+    };
     const expiresIn = process.env.JWT_EXPIRES_IN || '8h';
     const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn });
 
-    return reply.send({ token, tenant_id: tenant.id });
+    return reply.send({ token, tenant_id: tenant.id, is_admin: isAdmin });
   });
 }

@@ -18,7 +18,7 @@ export async function authenticate(request, reply) {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    request.user = { id: decoded.id, email: decoded.email, role: decoded.role, tenant_id: decoded.tenant_id };
+    request.user = { id: decoded.id, email: decoded.email, role: decoded.role, tenant_id: decoded.tenant_id, is_admin: decoded.is_admin, is_super_admin: decoded.is_super_admin };
   } catch (err) {
     logger.warn({ err: err.message }, 'JWT verification failed');
     return reply.code(401).send({ error: 'Invalid or expired token' });
