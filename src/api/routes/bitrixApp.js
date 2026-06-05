@@ -116,7 +116,7 @@ function buildAppHtml(data) {
   parts.push('<head>');
   parts.push('<meta charset="utf-8">');
   parts.push('<meta name="viewport" content="width=device-width, initial-scale=1">');
-  parts.push('<title>MandaMail</title>');
+  parts.push('<title>Manda E-mail Parser</title>');
   parts.push('<script src="https://api.bitrix24.com/api/v1/"><\/script>');
   parts.push('<style>');
   parts.push(getAppCss());
@@ -328,7 +328,7 @@ function getLoginHtml() {
   return [
     '<div id="login-screen" class="login-screen">',
     '  <div class="login-card">',
-    '    <h1>MandaMail</h1>',
+    '    <h1>Manda E-mail Parser</h1>',
     '    <p>Faça login para acessar o painel</p>',
     '    <div class="form-group">',
     '      <label>Email</label>',
@@ -365,15 +365,16 @@ function getAppShellHtml() {
   return [
     '<div id="app-shell" class="app" style="display:none">',
     '  <aside class="sidebar">',
-    '    <div class="sidebar-brand">',
-    '      <h2>MandaMail</h2>',
-    '      <small>Email → Bitrix24</small>',
+    '    <div class="sidebar-brand" style="padding:16px 20px 20px;border-bottom:1px solid rgba(255,255,255,0.08)">',
+    '      <h2 style="font-size:15px;color:#60a5fa;font-weight:700;letter-spacing:-0.3px">Manda E-mail Parser</h2>',
+    '      <small style="color:#6b7280;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Automação Email → CRM</small>',
     '    </div>',
-    '    <nav class="sidebar-nav">',
+    '    <nav class="sidebar-nav" style="padding:14px 0">',
     '      <a class="nav-item active" data-page="dashboard"><span class="nav-icon">📊</span> <span>Painel</span></a>',
     '      <a class="nav-item" data-page="accounts"><span class="nav-icon">📬</span> <span>Contas IMAP</span></a>',
-    '      <a class="nav-item" data-page="mapping"><span class="nav-icon">🔀</span> <span>Mapeamento de Funil</span></a>',
+    '      <a class="nav-item" data-page="mapping"><span class="nav-icon">🔀</span> <span>Mapeamento</span></a>',
     '      <a class="nav-item" data-page="logs"><span class="nav-icon">📋</span> <span>Logs</span></a>',
+    '      <div style="height:1px;background:rgba(255,255,255,0.06);margin:10px 20px"></div>',
     '      <a class="nav-item" data-page="settings"><span class="nav-icon">⚙️</span> <span>Configurações</span></a>',
     '      <a class="nav-item" data-page="users" id="nav-users" style="display:none"><span class="nav-icon">👥</span> <span>Usuários</span></a>',
     '      <a class="nav-item" data-page="plan"><span class="nav-icon">💎</span> <span>Plano</span></a>',
@@ -719,7 +720,7 @@ function getSettingsPageHtml() {
     '      <div style="display:grid;gap:10px">',
     '        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f3f4f6">',
     '          <span style="font-size:12px;color:#6b7280">Aplicação</span>',
-    '          <span style="font-size:12px;color:#1a1a2e;font-weight:500">MandaMail v2.0</span>',
+    '          <span style="font-size:12px;color:#1a1a2e;font-weight:500">Manda E-mail Parser v2.0</span>',
     '        </div>',
     '        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f3f4f6">',
     '          <span style="font-size:12px;color:#6b7280">Tenant ID</span>',
