@@ -92,6 +92,18 @@ export const DealBuilder = {
 
     const dealId = await bx.call('crm.deal.add', { fields });
 
+    // Explicitly link contact to deal (CONTACT_IDS in crm.deal.add doesn't always work)
+    if (contactId) {
+      try {
+        await bx.call('crm.deal.contact.add', {
+          id: dealId,
+          fields: { CONTACT_ID: contactId },
+        });
+      } catch (e) {
+        // Non-fatal: deal was created, contact link is a bonus
+      }
+    }
+
     return dealId;
   },
 };
