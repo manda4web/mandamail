@@ -1,4 +1,5 @@
 import { BitrixClient } from './BitrixClient.js';
+import logger from '../logger.js';
 
 const MAX_TITLE_LENGTH = 300;
 
@@ -44,10 +45,12 @@ export const DealBuilder = {
     // Build fields object based on mapping
     const fields = {
       STAGE_ID: tenant.bitrix_stage_id || 'NEW',
-      CATEGORY_ID: tenant.bitrix_category_id || 0,
+      CATEGORY_ID: parseInt(tenant.bitrix_category_id) || 0,
       CONTACT_IDS: [contactId],
-      ASSIGNED_BY_ID: tenant.bitrix_responsible_id || 1,
+      ASSIGNED_BY_ID: parseInt(tenant.bitrix_responsible_id) || 1,
     };
+
+    logger.info({ CATEGORY_ID: fields.CATEGORY_ID, STAGE_ID: fields.STAGE_ID, ASSIGNED_BY_ID: fields.ASSIGNED_BY_ID, category_type: typeof tenant.bitrix_category_id, category_raw: tenant.bitrix_category_id }, '[DealBuilder] Creating deal with mapping');
 
     // Apply mapped fields (or defaults)
     const subjectField = mapping.subject || 'TITLE';
