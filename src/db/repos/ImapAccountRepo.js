@@ -187,8 +187,8 @@ export async function create(tenantId, data) {
   const passwordEnc = encrypt(data.password);
 
   const { rows } = await db.query(
-    `INSERT INTO imap_accounts (tenant_id, label, email, host, port, username, password_enc, use_ssl, mailbox, poll_mode, poll_interval_sec, active, bitrix_category_id, bitrix_stage_id, bitrix_responsible_id, field_mapping, deal_mode, sync_start_date)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    `INSERT INTO imap_accounts (tenant_id, label, email, host, port, username, password_enc, use_ssl, mailbox, poll_mode, poll_interval_sec, active, bitrix_category_id, bitrix_stage_id, bitrix_responsible_id, field_mapping, deal_mode, sync_start_date, parser_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
      RETURNING *`,
     [
       tenantId,
@@ -209,6 +209,7 @@ export async function create(tenantId, data) {
       data.field_mapping ? JSON.stringify(data.field_mapping) : null,
       data.deal_mode ?? null,
       data.sync_start_date ?? null,
+      data.parser_type ?? 'standard',
     ]
   );
   return rows[0];
@@ -233,6 +234,7 @@ export async function update(id, data) {
     'poll_mode',
     'poll_interval_sec',
     'active',
+    'parser_type',
   ];
 
   const setClauses = [];

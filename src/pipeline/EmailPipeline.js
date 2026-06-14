@@ -6,6 +6,7 @@ import { db } from '../db/client.js';
 import { DedupEngine } from './DedupEngine.js';
 import { FilterEngine } from './FilterEngine.js';
 import { parseRaw } from '../imap/EmailParser.js';
+import { parseOlxLead, applyOlxLead } from '../imap/OlxParser.js';
 import { ContactResolver } from '../bitrix/ContactResolver.js';
 import { DealBuilder } from '../bitrix/DealBuilder.js';
 import { ActivityWriter } from '../bitrix/ActivityWriter.js';
@@ -138,6 +139,18 @@ export const EmailPipeline = {
 
   // Called by Pipeline and RetryWorker
   async _processInBitrix(account, email, event) {
+    // OLX parser: when this account is an OLX lead inbox, extract the real
+    // customer data from the email body. Standard accounts are untouched.
+    if (account.parser_type === 'olx') {
+      const lead = parseOlxLead(email);
+      if (lead) {
+        email = applyOlxLead(email, lead);
+        logger.info(`[Pipeline][OLX] lead extracted: ${email.fromName} <${email.fromEmail}> phone=${lead.phone || '-'} ad=${lead.adTitle || '-'}`);
+      } else {
+        logger.warn(`[Pipeline][OLX] could not parse OLX lead for event=${event.id}, falling back to standard`);
+      }
+    }
+
     const tenant = {
       bitrix_url: account.bitrix_url,
       bitrix_webhook_token: account.bitrix_webhook_token,

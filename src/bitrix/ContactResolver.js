@@ -33,11 +33,18 @@ export const ContactResolver = {
     // Use email local part as name when from_name is empty/null (Req 8.4)
     const contactName = email.fromName || email.fromEmail.split('@')[0];
 
+    const contactFields = {
+      NAME: contactName,
+      EMAIL: [{ VALUE: email.fromEmail, VALUE_TYPE: 'WORK' }],
+    };
+
+    // Add phone if present (e.g. OLX leads include the customer phone)
+    if (email.phone) {
+      contactFields.PHONE = [{ VALUE: email.phone, VALUE_TYPE: 'WORK' }];
+    }
+
     const contactId = await bx.call('crm.contact.add', {
-      fields: {
-        NAME: contactName,
-        EMAIL: [{ VALUE: email.fromEmail, VALUE_TYPE: 'WORK' }],
-      },
+      fields: contactFields,
     });
 
     return { contactId, wasCreated: true };
