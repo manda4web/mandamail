@@ -39,6 +39,7 @@ export function parseOlxLead(email) {
     phone: extractPhone(text),
     adTitle: extractAdTitle(text),
     adPrice: extractPrice(text),
+    priceNumber: extractPriceNumber(text),
     photoUrl: extractPhotoUrl(html),
     leadId: extractLeadId(text),
   };
@@ -126,6 +127,19 @@ function extractPrice(text) {
 }
 
 /**
+ * Extracts the price as a number (e.g. "R$ 75900,00" -> 75900.00).
+ * Returns null if no price found.
+ */
+function extractPriceNumber(text) {
+  const m = text.match(/R\$\s*([\d.]+,\d{2})/);
+  if (!m) return null;
+  // "75.900,00" or "75900,00" -> remove thousand dots, replace comma with dot
+  const normalized = m[1].replace(/\./g, '').replace(',', '.');
+  const num = parseFloat(normalized);
+  return isNaN(num) ? null : num;
+}
+
+/**
  * Extracts the product photo URL from the HTML body.
  * Looks for img tags that point to OLX image CDNs.
  */
@@ -172,7 +186,7 @@ export function applyOlxLead(email, lead) {
   const customerEmail = lead.email || email.fromEmail;
   const customerName = lead.name || (customerEmail ? customerEmail.split('@')[0] : 'Lead OLX');
 
-  // Build deal description with product info + photo
+  // Build deal description: ad title + customer/contact info + product photo
   let descParts = [];
   if (lead.adTitle) descParts.push('<b>Anúncio:</b> ' + escapeHtml(lead.adTitle));
   if (lead.adPrice) descParts.push('<b>Preço:</b> ' + escapeHtml(lead.adPrice));
@@ -184,8 +198,8 @@ export function applyOlxLead(email, lead) {
     productHtml += '<br><br><img src="' + lead.photoUrl + '" style="max-width:100%;border-radius:8px" />';
   }
 
-  // Deal title = product name, fallback to original subject
-  const dealTitle = lead.adTitle || email.subject || ('Lead OLX - ' + customerName);
+  // Deal title = ad title (the product), fallback to customer name
+  const dealTitle = lead.adTitle || ('Lead OLX - ' + customerName);
 
   return {
     ...email,
@@ -196,6 +210,7 @@ export function applyOlxLead(email, lead) {
     subject: dealTitle,
     bodyHtml: productHtml || email.bodyHtml,
     bodyText: descParts.map(p => p.replace(/<[^>]+>/g, '')).join('\n') || email.bodyText,
+    dealValue: lead.priceNumber || null,
     olxLead: lead,
   };
 }

@@ -52,6 +52,12 @@ export const DealBuilder = {
 
     logger.info({ CATEGORY_ID: fields.CATEGORY_ID, STAGE_ID: fields.STAGE_ID, ASSIGNED_BY_ID: fields.ASSIGNED_BY_ID, category_type: typeof tenant.bitrix_category_id, category_raw: tenant.bitrix_category_id }, '[DealBuilder] Creating deal with mapping');
 
+    // Deal value (OPPORTUNITY) — e.g. OLX leads carry the product price
+    if (email.dealValue && Number(email.dealValue) > 0) {
+      fields.OPPORTUNITY = Number(email.dealValue);
+      fields.CURRENCY_ID = 'BRL';
+    }
+
     // Apply mapped fields (or defaults)
     const subjectField = mapping.subject || 'TITLE';
     const bodyField = mapping.body || 'COMMENTS';
