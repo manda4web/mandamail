@@ -119,6 +119,66 @@ export default async function adminRoutes(fastify) {
     return rows;
   });
 
+  // PATCH /admin/subscriptions/:tenantId — manually change a tenant's plan/status
+  fastify.patch('/admin/subscriptions/:tenantId', { preHandler: [requireAdmin] }, async (request, reply) => {
+    const { tenantId } = request.params;
+    const { plan_id, status, billing_cycle, current_period_end } = request.body || {};
+
+    const allowed = [];
+    const values = [];
+    let idx = 1;
+    if (plan_id !== undefined) { allowed.push(`plan_id = $${idx++}`); values.push(plan_id || null); }
+    if (status !== undefined) {
+      if (!['trial', 'active', 'canceled', 'past_due', 'expired'].includes(status)) {
+        return reply.code(400).send({ error: 'Invalid status' });
+      }
+      allowed.push(`status = $${idx++}`); values.push(status);
+    }
+    if (billing_cycle !== undefined) { allowed.push(`billing_cycle = $${idx++}`); values.push(billing_cycle); }
+    if (current_period_end !== undefined) { allowed.push(`current_period_end = $${idx++}`); values.push(current_period_end || null); }
+
+    if (allowed.length === 0) return reply.code(400).send({ error: 'No fields to update' });
+
+    allowed.push('updated_at = NOW()');
+    values.push(tenantId);
+
+    // Upsert: if no subscription exists, create one
+    const { rows: existing } = await db.query('SELECT id FROM subscriptions WHERE tenant_id = $1', [tenantId]);
+    if (existing.length === 0) {
+      await db.query(
+        `INSERT INTO subscriptions (tenant_id, plan_id, status, billing_cycle, current_period_end)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [tenantId, plan_id || null, status || 'active', billing_cycle || 'monthly', current_period_end || null]
+      );
+    } else {
+      await db.query(
+        `UPDATE subscriptions SET ${allowed.join(', ')} WHERE tenant_id = $${idx}`,
+        values
+      );
+    }
+
+    // Restart/stop workers based on new status
+    try {
+      const { TenantScheduler } = await import('../../imap/TenantScheduler.js');
+      if (status === 'active' || status === 'trial') {
+        await TenantScheduler.startTenant(tenantId);
+      } else if (status === 'canceled' || status === 'expired') {
+        await TenantScheduler.handleSubscriptionInactive(tenantId, 'admin_' + status);
+      }
+    } catch (err) {
+      logger.error(`[Admin] Failed to update workers for tenant ${tenantId}: ${err.message}`);
+    }
+
+    const { rows } = await db.query(
+      `SELECT s.*, t.name as tenant_name, t.bitrix_url, p.name as plan_name
+       FROM subscriptions s JOIN tenants t ON t.id = s.tenant_id
+       LEFT JOIN plans p ON p.id = s.plan_id WHERE s.tenant_id = $1`,
+      [tenantId]
+    );
+    logger.info({ tenantId, status, plan_id }, '[Admin] Subscription manually updated');
+    return rows[0];
+  });
+
   // ===== PUBLIC: Get plans (for tenant plan page) =====
   fastify.get('/plans', async (request, reply) => {
     const { rows } = await db.query('SELECT id, name, description, price_monthly, price_yearly, email_limit, imap_limit FROM plans WHERE active = true ORDER BY email_limit ASC');
