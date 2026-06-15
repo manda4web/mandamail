@@ -44,6 +44,8 @@ export default async function subscriptionRoutes(fastify) {
       plan_id: sub.plan_id,
       email_limit: sub.email_limit,
       imap_limit: sub.imap_limit,
+      stripe_subscription_id: sub.stripe_subscription_id || null,
+      canceled_at: sub.canceled_at || null,
     };
   });
 

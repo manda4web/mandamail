@@ -238,4 +238,46 @@ export default async function stripeRoutes(fastify) {
 
     return { url: session.url };
   });
+
+  // POST /stripe/cancel — Cancel a subscription (stop billing at period end)
+  fastify.post('/stripe/cancel', async (request, reply) => {
+    const { tenant_id, immediate } = request.body || {};
+    if (!tenant_id) return reply.code(400).send({ error: 'tenant_id required' });
+
+    const { rows } = await db.query(
+      'SELECT stripe_subscription_id, current_period_end FROM subscriptions WHERE tenant_id = $1',
+      [tenant_id]
+    );
+    const sub = rows[0];
+    if (!sub || !sub.stripe_subscription_id) {
+      return reply.code(404).send({ error: 'Nenhuma assinatura ativa encontrada' });
+    }
+
+    try {
+      if (immediate) {
+        // Cancel immediately and stop billing now
+        await stripe.subscriptions.cancel(sub.stripe_subscription_id);
+        await db.query(
+          "UPDATE subscriptions SET status = 'canceled', canceled_at = NOW(), updated_at = NOW() WHERE tenant_id = $1",
+          [tenant_id]
+        );
+        try {
+          const { TenantScheduler } = await import('../../imap/TenantScheduler.js');
+          await TenantScheduler.handleSubscriptionInactive(tenant_id, 'canceled_by_user');
+        } catch (e) { logger.error(`[Stripe] worker stop failed: ${e.message}`); }
+      } else {
+        // Cancel at period end — service stays active until current_period_end, no renewal
+        await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
+        await db.query(
+          "UPDATE subscriptions SET canceled_at = NOW(), updated_at = NOW() WHERE tenant_id = $1",
+          [tenant_id]
+        );
+      }
+      logger.info({ tenant_id, immediate: !!immediate }, '[Stripe] Subscription canceled by user');
+      return { success: true, immediate: !!immediate, period_end: sub.current_period_end };
+    } catch (err) {
+      logger.error({ tenant_id, error: err.message }, '[Stripe] Cancel failed');
+      return reply.code(502).send({ error: 'Não foi possível cancelar: ' + err.message });
+    }
+  });
 }
