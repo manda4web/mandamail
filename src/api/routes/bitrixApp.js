@@ -5,6 +5,20 @@
  */
 
 export default async function bitrixAppRoutes(fastify) {
+  fastify.get('/assets/logo.png', async (request, reply) => {
+    const { readFile } = await import('node:fs/promises');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    try {
+      const buf = await readFile(join(__dirname, '..', '..', 'assets', 'logo.png'));
+      reply.header('Cache-Control', 'public, max-age=604800');
+      reply.type('image/png').send(buf);
+    } catch (err) {
+      reply.code(404).send({ error: 'logo not found' });
+    }
+  });
+
   fastify.get('/bitrix/app', async (request, reply) => {
     const data = extractBitrixData(request.query, {});
     reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -328,6 +342,7 @@ function getLoginHtml() {
   return [
     '<div id="login-screen" class="login-screen">',
     '  <div class="login-card">',
+    '    <img src="/assets/logo.png" alt="Manda E-mail Parser" style="width:64px;height:64px;border-radius:16px;margin-bottom:12px">',
     '    <h1>Manda E-mail Parser</h1>',
     '    <p>Faça login para acessar o painel</p>',
     '    <div class="form-group">',
@@ -365,8 +380,9 @@ function getAppShellHtml() {
   return [
     '<div id="app-shell" class="app" style="display:none">',
     '  <aside class="sidebar">',
-    '    <div class="sidebar-brand" style="padding:16px 20px 20px;border-bottom:1px solid rgba(255,255,255,0.08)">',
-    '      <h2 style="font-size:15px;color:#60a5fa;font-weight:700;letter-spacing:-0.3px">Manda E-mail Parser</h2>',
+    '    <div class="sidebar-brand" style="padding:20px 20px 18px;border-bottom:1px solid rgba(255,255,255,0.08);text-align:center">',
+    '      <img src="/assets/logo.png" alt="Manda E-mail Parser" style="width:56px;height:56px;border-radius:14px;margin-bottom:10px;box-shadow:0 4px 12px rgba(0,0,0,0.25)">',
+    '      <h2 style="font-size:15px;color:#60a5fa;font-weight:700;letter-spacing:-0.3px;margin:0">Manda E-mail Parser</h2>',
     '      <small style="color:#6b7280;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Automação Email → CRM</small>',
     '    </div>',
     '    <nav class="sidebar-nav" style="padding:14px 0">',
