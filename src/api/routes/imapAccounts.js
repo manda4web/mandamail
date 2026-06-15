@@ -214,6 +214,58 @@ export default async function imapAccountsRoutes(fastify) {
   });
 
   /**
+   * POST /tenants/:id/imap-folders
+   * List available IMAP folders/mailboxes for a connection.
+   * Accepts either { accountId } (use stored creds) or raw { host, port, username, password, use_ssl }.
+   */
+  fastify.post('/tenants/:id/imap-folders', {
+    preHandler: [requireTenantAccess],
+  }, async (request, reply) => {
+    const body = request.body || {};
+    let conn;
+
+    if (body.accountId) {
+      const account = await ImapAccountRepo.findById(body.accountId);
+      if (!account) return reply.code(404).send({ error: 'IMAP account not found' });
+      conn = { host: account.host, port: account.port || 993, secure: account.use_ssl !== false, user: account.username, pass: account.password };
+    } else {
+      if (!body.host || !body.username || !body.password) {
+        return reply.code(400).send({ error: 'host, username e password são obrigatórios' });
+      }
+      conn = { host: body.host, port: body.port || 993, secure: body.use_ssl !== false, user: body.username, pass: body.password };
+    }
+
+    const { ImapFlow } = await import('imapflow');
+    let client;
+    try {
+      client = new ImapFlow({
+        host: conn.host,
+        port: conn.port,
+        secure: conn.secure,
+        auth: { user: conn.user, pass: conn.pass },
+        logger: false,
+        greetTimeout: 15000,
+        socketTimeout: 15000,
+      });
+      await client.connect();
+      const list = await client.list();
+      await client.logout();
+
+      // Return folder paths with friendly names
+      const folders = (list || [])
+        .filter(f => !f.flags || !f.flags.has || !f.flags.has('\\Noselect'))
+        .map(f => ({ path: f.path, name: f.name || f.path, specialUse: f.specialUse || null }));
+
+      return { folders };
+    } catch (err) {
+      logger.error({ host: conn.host, error: err.message }, 'IMAP folder list failed');
+      return reply.code(502).send({ error: err.message });
+    } finally {
+      if (client) { try { await client.logout(); } catch {} }
+    }
+  });
+
+  /**
    * PATCH /tenants/:id/imap-accounts/:accountId/toggle
    * Toggle (pause/resume) an IMAP account worker.
    * Body: { active: boolean }
