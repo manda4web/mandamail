@@ -90,7 +90,9 @@ export const EmailPipeline = {
       }
 
       // STEP 3: Filtering (Req 6)
-      if (FilterEngine.shouldIgnore(account, email)) {
+      // OLX accounts always receive from noreply@olx.com.br, which the global
+      // filter would block — skip sender/subject filtering for OLX parsers.
+      if (account.parser_type !== 'olx' && FilterEngine.shouldIgnore(account, email)) {
         await EmailEventRepo.setStatus(event.id, 'IGNORADO');
         logger.info(`[Pipeline] IGNORADO id=${event.id}`);
         return;
