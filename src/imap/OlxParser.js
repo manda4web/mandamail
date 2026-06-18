@@ -91,12 +91,20 @@ function extractEmail(text) {
 
 /**
  * Extracts the customer phone number.
+ * Normalizes to E.164-style with Brazil country code (55) when missing.
  */
 function extractPhone(text) {
   const labeled = extractField(text, ['Telefone', 'Phone', 'Celular', 'Tel']);
   if (labeled) {
-    const digits = labeled.replace(/\D/g, '');
-    if (digits.length >= 10 && digits.length <= 13) return digits;
+    let digits = labeled.replace(/\D/g, '');
+    if (digits.length >= 10 && digits.length <= 13) {
+      // If it already starts with country code 55 (12-13 digits), keep as is.
+      // Otherwise (10-11 digits = DDD + number), prepend 55.
+      if (!(digits.length >= 12 && digits.startsWith('55'))) {
+        digits = '55' + digits;
+      }
+      return digits;
+    }
   }
   return null;
 }
