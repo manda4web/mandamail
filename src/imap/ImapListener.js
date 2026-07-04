@@ -58,8 +58,9 @@ export class ImapListener {
         await this._runPoll();
       }
     } catch (err) {
-      logger.error(`[IMAP][${this.account.email}] connection failed: ${err.message}`);
-      await ImapAccountRepo.updateLastPoll(this.account.id, err.message);
+      const detail = err.responseText || err.response || err.authenticationFailed || err.serverResponseCode || err.message;
+      logger.error(`[IMAP][${this.account.email}] connection failed: ${err.message} | detail: ${detail}`);
+      await ImapAccountRepo.updateLastPoll(this.account.id, String(detail).substring(0, 200));
       if (this.running) {
         await this._reconnect();
       }
