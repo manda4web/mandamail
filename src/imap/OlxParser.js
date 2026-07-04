@@ -110,19 +110,52 @@ function extractPhone(text) {
 }
 
 /**
- * Extracts the advertisement title (the product name).
+ * Checks if a text line is a valid vehicle/product title candidate
+ * (not a URL, not a label, not the price, has letters).
+ */
+function isValidTitleLine(line) {
+  if (!line || line.length < 4) return false;
+  if (/^https?:\/\//i.test(line)) return false;           // URL
+  if (/^\[?https?:/i.test(line)) return false;            // bracketed URL
+  if (/^R\$/i.test(line)) return false;                   // price
+  if (/^(nome|e-?mail|telefone|celular|tel)\s*:/i.test(line)) return false; // label
+  if (/identificador do lead/i.test(line)) return false;
+  if (!/[a-zA-ZÀ-ÿ]/.test(line)) return false;            // must have letters
+  return true;
+}
+
+/**
+ * Extracts the advertisement / vehicle title (the product name).
+ * Handles both OLX formats:
+ *  - "Anúncio:" (interesse em anúncio)
+ *  - "Simulação de financiamento feita para o veículo:" (simulação)
+ * The vehicle title is the line right after these headers, or the valid
+ * line immediately before the price (R$ ...).
  */
 function extractAdTitle(text) {
-  // Common patterns: "Anúncio:" followed by the title on next lines
-  const labeled = extractField(text, ['Anúncio', 'Anuncio', 'Produto']);
-  if (labeled && labeled.length > 3) return labeled;
-
-  // Heuristic: look for a line after "Anúncio:" that looks like a product
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const idx = lines.findIndex(l => /an[uú]ncio/i.test(l));
-  if (idx >= 0 && lines[idx + 1] && lines[idx + 1].length > 3) {
-    return lines[idx + 1];
+
+  // 1. PRIMARY: the valid line immediately before the price (R$ ...).
+  //    This is the most reliable — the vehicle title always precedes the price.
+  var priceIdx = lines.findIndex(function(l){ return /^R\$\s*[\d.]+,\d{2}/.test(l); });
+  if (priceIdx > 0) {
+    for (var k = priceIdx - 1; k >= 0 && k >= priceIdx - 4; k--) {
+      if (isValidTitleLine(lines[k])) return lines[k];
+    }
   }
+
+  // 2. Fallback: specific header "feita para o veículo:" / "Anúncio:"
+  var headerRe = /(feita para o ve[ií]culo|^an[uú]ncio|^produto)/i;
+  for (var i = 0; i < lines.length; i++) {
+    if (headerRe.test(lines[i])) {
+      var inline = lines[i].split(/:\s*/).slice(1).join(': ').trim();
+      if (isValidTitleLine(inline)) return inline;
+      for (var j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        if (isValidTitleLine(lines[j])) return lines[j];
+      }
+    }
+  }
+
   return null;
 }
 
