@@ -92,22 +92,22 @@ export class ImapListener {
   }
 
   async _runIdle() {
-    const lock = await this.client.getMailboxLock(this.account.mailbox);
-    try {
-      await this._fetchUnseen();
-      // Use exists event for new messages
-      this.client.on('exists', async () => {
-        if (this.running) {
-          await this._fetchUnseen();
-        }
-      });
-      // Keep connection alive with IDLE
-      while (this.running) {
-        await this._sleep(30_000);
-        await ImapAccountRepo.updateLastPoll(this.account.id, null);
+    // Do NOT hold a mailbox lock across the idle loop — _fetchUnseen acquires
+    // its own short-lived lock. Holding it here would deadlock the re-entrant
+    // lock acquisition inside _fetchUnseen (ImapFlow locks are not re-entrant).
+    await this._fetchUnseen();
+
+    // Use exists event for new messages
+    this.client.on('exists', async () => {
+      if (this.running) {
+        await this._fetchUnseen();
       }
-    } finally {
-      lock.release();
+    });
+
+    // Keep connection alive
+    while (this.running) {
+      await this._sleep(30_000);
+      await ImapAccountRepo.updateLastPoll(this.account.id, null);
     }
   }
 

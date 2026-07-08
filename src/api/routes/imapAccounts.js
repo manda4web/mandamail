@@ -226,7 +226,7 @@ export default async function imapAccountsRoutes(fastify) {
 
     if (body.accountId) {
       const account = await ImapAccountRepo.findById(body.accountId);
-      if (!account) return reply.code(404).send({ error: 'IMAP account not found' });
+      if (!account || account.tenant_id !== request.params.id) return reply.code(404).send({ error: 'IMAP account not found' });
       conn = { host: account.host, port: account.port || 993, secure: account.use_ssl !== false, user: account.username, pass: account.password };
     } else {
       if (!body.host || !body.username || !body.password) {
@@ -283,8 +283,14 @@ export default async function imapAccountsRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const { accountId } = request.params;
+    const { id: tenantId, accountId } = request.params;
     const { active } = request.body;
+
+    // Verify the account belongs to this tenant
+    const owned = await ImapAccountRepo.findById(accountId);
+    if (!owned || owned.tenant_id !== tenantId) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
 
     // Update the active status in the database
     const updated = await ImapAccountRepo.setActive(accountId, active);
@@ -314,7 +320,13 @@ export default async function imapAccountsRoutes(fastify) {
   fastify.delete('/tenants/:id/imap-accounts/:accountId', {
     preHandler: [requireTenantAccess],
   }, async (request, reply) => {
-    const { accountId } = request.params;
+    const { id: tenantId, accountId } = request.params;
+
+    // Verify the account belongs to this tenant before deleting
+    const owned = await ImapAccountRepo.findById(accountId);
+    if (!owned || owned.tenant_id !== tenantId) {
+      return reply.code(404).send({ error: 'IMAP account not found' });
+    }
 
     // Stop the worker first
     await TenantScheduler.stopAccount(accountId);
@@ -336,10 +348,10 @@ export default async function imapAccountsRoutes(fastify) {
   fastify.post('/tenants/:id/imap-accounts/:accountId/test', {
     preHandler: [requireTenantAccess],
   }, async (request, reply) => {
-    const { accountId } = request.params;
+    const { id: tenantId, accountId } = request.params;
 
     const account = await ImapAccountRepo.findById(accountId);
-    if (!account) {
+    if (!account || account.tenant_id !== tenantId) {
       return reply.code(404).send({ error: 'IMAP account not found' });
     }
 
@@ -400,11 +412,11 @@ export default async function imapAccountsRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const { accountId } = request.params;
+    const { id: tenantId, accountId } = request.params;
     const data = request.body || {};
 
     const existing = await ImapAccountRepo.findById(accountId);
-    if (!existing) {
+    if (!existing || existing.tenant_id !== tenantId) {
       return reply.code(404).send({ error: 'IMAP account not found' });
     }
 

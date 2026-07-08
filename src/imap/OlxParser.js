@@ -97,12 +97,13 @@ function extractPhone(text) {
   const labeled = extractField(text, ['Telefone', 'Phone', 'Celular', 'Tel']);
   if (labeled) {
     let digits = labeled.replace(/\D/g, '');
-    if (digits.length >= 10 && digits.length <= 13) {
-      // If it already starts with country code 55 (12-13 digits), keep as is.
-      // Otherwise (10-11 digits = DDD + number), prepend 55.
-      if (!(digits.length >= 12 && digits.startsWith('55'))) {
-        digits = '55' + digits;
-      }
+    // Decide purely by length to avoid DDD-vs-countrycode collisions:
+    //  - 10 or 11 digits = local (DDD + number) → prepend country code 55
+    //  - 12 or 13 digits = already includes country code → keep as is
+    if (digits.length === 10 || digits.length === 11) {
+      return '55' + digits;
+    }
+    if (digits.length === 12 || digits.length === 13) {
       return digits;
     }
   }

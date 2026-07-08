@@ -85,10 +85,12 @@ export default async function authRoutes(fastify) {
     const { domain, member_id, auth_id, refresh_id, server_endpoint, application_token, auth_expires } = request.body;
     const { user_id: bitrixUserId, user_name: userName, user_email: userEmail, is_admin: isBitrixAdmin } = request.body;
 
-    // Validate application_token if configured (prevents forged auth requests)
+    // Validate application_token if configured (prevents forged auth requests).
+    // When a token is configured, it MUST be present and match — omitting it
+    // must NOT bypass the check.
     const expectedToken = process.env.BITRIX_APP_TOKEN;
-    if (expectedToken && application_token && application_token !== expectedToken) {
-      logger.warn({ domain, member_id }, 'Invalid application_token in /auth/bitrix');
+    if (expectedToken && application_token !== expectedToken) {
+      logger.warn({ domain, member_id, hasToken: !!application_token }, 'Invalid/missing application_token in /auth/bitrix');
       return reply.code(403).send({ error: 'Invalid application token' });
     }
 

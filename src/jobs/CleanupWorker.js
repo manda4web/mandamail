@@ -34,9 +34,17 @@ export class CleanupWorker {
     try {
       logger.info('[CleanupWorker] starting cleanup...');
 
-      // 1. Delete email_events older than 30 days (cascades to bitrix_results via FK)
+      // 1. Delete old email_events. The FKs from bitrix_results/retry_jobs do NOT
+      // cascade, so delete the child rows first, then the events themselves.
+      const OLD = `created_at < NOW() - INTERVAL '30 days'`;
+      await db.query(
+        `DELETE FROM retry_jobs WHERE email_event_id IN (SELECT id FROM email_events WHERE ${OLD})`
+      );
+      await db.query(
+        `DELETE FROM bitrix_results WHERE email_event_id IN (SELECT id FROM email_events WHERE ${OLD})`
+      );
       const deleteResult = await db.query(
-        `DELETE FROM email_events WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id`
+        `DELETE FROM email_events WHERE ${OLD} RETURNING id`
       );
       const deletedEvents = deleteResult.rowCount;
 
