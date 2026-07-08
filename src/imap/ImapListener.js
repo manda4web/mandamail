@@ -69,16 +69,21 @@ export class ImapListener {
 
   async _reconnect() {
     this.retryCount++;
+
+    // Exponential backoff capped at 5 minutes. NEVER give up permanently —
+    // the worker must keep trying so email processing runs 24/7 without
+    // requiring anyone to open the app. Transient Gmail drops/timeouts recover.
+    const MAX_DELAY = 5 * 60 * 1000; // 5 minutes
+    let delay = this.baseDelay * Math.pow(2, Math.min(this.retryCount - 1, 6));
+    if (delay > MAX_DELAY) delay = MAX_DELAY;
+
     if (this.retryCount > this.maxRetries) {
-      logger.error(`[IMAP][${this.account.email}] exhausted ${this.maxRetries} retries, stopping`);
-      // Mark account as having connection failure (Req 3.4)
-      await ImapAccountRepo.updateLastPoll(this.account.id, `Connection failed after ${this.maxRetries} retries`);
-      return;
+      logger.warn(`[IMAP][${this.account.email}] still failing (attempt ${this.retryCount}), retrying in ${Math.round(delay/1000)}s`);
+      await ImapAccountRepo.updateLastPoll(this.account.id, `Reconectando... (tentativa ${this.retryCount})`);
+    } else {
+      logger.info(`[IMAP][${this.account.email}] reconnecting in ${delay}ms (attempt ${this.retryCount})`);
     }
 
-    // Exponential backoff: 5s, 10s, 20s, 40s, 80s (Req 3.1)
-    const delay = this.baseDelay * Math.pow(2, this.retryCount - 1);
-    logger.info(`[IMAP][${this.account.email}] reconnecting in ${delay}ms (attempt ${this.retryCount}/${this.maxRetries})`);
     await this._sleep(delay);
 
     if (this.running) {

@@ -111,4 +111,41 @@ export const TenantScheduler = {
       lastError: w.account.last_error,
     }));
   },
+
+  /**
+   * Periodic supervisor: ensures every active account (with a valid plan) has a
+   * running worker. Restarts any worker that died or was never started.
+   * This keeps email processing running 24/7 without depending on the UI.
+   */
+  startSupervisor(intervalMs = 120000) {
+    if (this._supervisorTimer) return;
+    this._supervisorTimer = setInterval(async () => {
+      try {
+        const accounts = await ImapAccountRepo.findAllActive();
+        for (const account of accounts) {
+          const existing = workers.get(account.id);
+          const alive = existing && existing.running;
+          if (alive) continue;
+
+          // Worker missing or not running — check plan then (re)start
+          const access = await SubscriptionRepo.checkAccess(account.tenant_id);
+          if (!access.allowed) {
+            // Plan inactive — make sure any lingering worker is stopped
+            if (existing) await this.stopAccount(account.id);
+            continue;
+          }
+          // Remove dead worker reference and restart
+          if (existing) {
+            try { await existing.stop(); } catch {}
+            workers.delete(account.id);
+          }
+          logger.warn(`[Scheduler][Supervisor] restarting dead worker: ${account.email}`);
+          await this.startAccount(account);
+        }
+      } catch (err) {
+        logger.error(`[Scheduler][Supervisor] error: ${err.message}`);
+      }
+    }, intervalMs);
+    logger.info(`[Scheduler] supervisor started — checking every ${Math.round(intervalMs/1000)}s`);
+  },
 };

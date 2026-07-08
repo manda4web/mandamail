@@ -113,6 +113,8 @@ async function main() {
   // 6. Start TenantScheduler (IMAP workers)
   try {
     await TenantScheduler.startAll();
+    // Supervisor: restarts any dead worker every 2 minutes (24/7 processing)
+    TenantScheduler.startSupervisor(120000);
     logger.info('[Startup] TenantScheduler started');
   } catch (err) {
     logger.error(`[Startup] TenantScheduler failed: ${err.message}`);
