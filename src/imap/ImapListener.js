@@ -129,23 +129,34 @@ export class ImapListener {
         }
 
         for (const msg of messages) {
-          // Mark as seen IMMEDIATELY to prevent reprocessing loops
+          // Skip emails larger than 20MB to prevent memory issues.
+          // These will never parse well, so mark seen to avoid re-fetching.
+          if (msg.source && msg.source.length > 20_000_000) {
+            logger.warn(`[IMAP][${this.account.email}] skipping oversized message (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
+            await this._markSeen(msg.uid);
+            continue;
+          }
+
+          let parsed;
           try {
-            await this.client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
-          } catch (flagErr) {
-            logger.warn(`[IMAP][${this.account.email}] failed to mark message as seen: ${flagErr.message}`);
+            parsed = await simpleParser(msg.source);
+          } catch (parseErr) {
+            // Malformed email — retrying won't help. Mark seen and skip so we
+            // don't loop forever on a poison message.
+            logger.error(`[IMAP][${this.account.email}] parse error (marking seen, skipping): ${parseErr.message}`);
+            await this._markSeen(msg.uid);
+            continue;
           }
 
           try {
-            // Skip emails larger than 20MB to prevent memory issues
-            if (msg.source && msg.source.length > 20_000_000) {
-              logger.warn(`[IMAP][${this.account.email}] skipping oversized message (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
-              continue;
-            }
-            const parsed = await simpleParser(msg.source);
             await EmailPipeline.process(this.account, parsed);
+            // Only mark seen AFTER the pipeline persisted/handled the email.
+            // If process() throws (e.g. transient DB failure), we leave the
+            // message UNSEEN so it is retried on the next fetch instead of
+            // being silently lost.
+            await this._markSeen(msg.uid);
           } catch (err) {
-            logger.error(`[IMAP][${this.account.email}] error processing message: ${err.message}`);
+            logger.error(`[IMAP][${this.account.email}] error processing message (left UNSEEN for retry): ${err.message}`);
           }
         }
       } finally {
@@ -153,6 +164,14 @@ export class ImapListener {
       }
     } catch (err) {
       logger.error(`[IMAP][${this.account.email}] fetchUnseen error: ${err.message}`);
+    }
+  }
+
+  async _markSeen(uid) {
+    try {
+      await this.client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
+    } catch (flagErr) {
+      logger.warn(`[IMAP][${this.account.email}] failed to mark message as seen: ${flagErr.message}`);
     }
   }
 
