@@ -122,22 +122,40 @@ export default async function stripeRoutes(fastify) {
 
     logger.info({ type: event.type, id: event.id }, '[Stripe] Webhook received');
 
+    // Idempotency: skip if this event was already processed (Stripe retries deliver
+    // the same event multiple times, which would e.g. inflate coupon usage counts).
+    try {
+      const ins = await db.query(
+        'INSERT INTO processed_stripe_events (event_id, type) VALUES ($1, $2) ON CONFLICT (event_id) DO NOTHING RETURNING event_id',
+        [event.id, event.type]
+      );
+      if (ins.rowCount === 0) {
+        logger.info({ id: event.id }, '[Stripe] Duplicate webhook event ignored');
+        return { received: true, duplicate: true };
+      }
+    } catch (err) {
+      logger.error({ error: err.message }, '[Stripe] Idempotency check failed');
+      // Continue anyway — better to risk a rare double than to drop the event
+    }
+
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object;
         const { tenant_id, plan_id, billing_cycle, coupon_id } = session.metadata || {};
 
         if (tenant_id && plan_id) {
+          // Period length depends on billing cycle (monthly vs yearly)
+          const interval = billing_cycle === 'yearly' ? "1 year" : "1 month";
           // Create or update subscription record
           await db.query(
             `INSERT INTO subscriptions (tenant_id, plan_id, billing_cycle, status, stripe_subscription_id, stripe_customer_id, coupon_id, current_period_start, current_period_end)
-             VALUES ($1, $2, $3, 'active', $4, $5, $6, NOW(), NOW() + INTERVAL '1 month')
+             VALUES ($1, $2, $3, 'active', $4, $5, $6, NOW(), NOW() + ($7)::interval)
              ON CONFLICT (tenant_id) DO UPDATE SET
                plan_id = $2, billing_cycle = $3, status = 'active',
                stripe_subscription_id = $4, stripe_customer_id = $5,
                coupon_id = $6, current_period_start = NOW(),
-               current_period_end = NOW() + INTERVAL '1 month', updated_at = NOW()`,
-            [tenant_id, plan_id, billing_cycle || 'monthly', session.subscription, session.customer, coupon_id || null]
+               current_period_end = NOW() + ($7)::interval, updated_at = NOW()`,
+            [tenant_id, plan_id, billing_cycle || 'monthly', session.subscription, session.customer, coupon_id || null, interval]
           );
 
           // Update tenant plan
@@ -162,23 +180,29 @@ export default async function stripeRoutes(fastify) {
 
       case 'customer.subscription.updated': {
         const sub = event.data.object;
-        const tenantId = sub.metadata?.tenant_id;
+        const status = sub.status === 'active' ? 'active' : sub.status === 'past_due' ? 'past_due' : sub.status;
+        await db.query(
+          'UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3, updated_at = NOW() WHERE stripe_subscription_id = $4',
+          [status, sub.current_period_start ? new Date(sub.current_period_start * 1000) : null, sub.current_period_end ? new Date(sub.current_period_end * 1000) : null, sub.id]
+        );
+
+        // Resolve tenant: prefer metadata, fallback to the subscription record
+        let tenantId = sub.metadata?.tenant_id;
+        if (!tenantId) {
+          const { rows } = await db.query('SELECT tenant_id FROM subscriptions WHERE stripe_subscription_id = $1', [sub.id]);
+          tenantId = rows[0]?.tenant_id;
+        }
+
         if (tenantId) {
-          const status = sub.status === 'active' ? 'active' : sub.status === 'past_due' ? 'past_due' : sub.status;
-          await db.query(
-            'UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3, updated_at = NOW() WHERE stripe_subscription_id = $4',
-            [status, sub.current_period_start ? new Date(sub.current_period_start * 1000) : null, sub.current_period_end ? new Date(sub.current_period_end * 1000) : null, sub.id]
-          );
-
-          // If subscription became active, start workers
-          if (status === 'active') {
-            try {
+          try {
+            if (status === 'active') {
               await TenantScheduler.startTenant(tenantId);
-            } catch (err) {
-              logger.error(`[Stripe] Failed to start workers for tenant ${tenantId}: ${err.message}`);
+            } else if (status === 'canceled' || status === 'unpaid' || status === 'incomplete_expired') {
+              await TenantScheduler.handleSubscriptionInactive(tenantId, status);
             }
+          } catch (err) {
+            logger.error(`[Stripe] Worker update failed for tenant ${tenantId}: ${err.message}`);
           }
-
           logger.info({ tenant_id: tenantId, status }, '[Stripe] Subscription updated');
         }
         break;
@@ -186,11 +210,17 @@ export default async function stripeRoutes(fastify) {
 
       case 'customer.subscription.deleted': {
         const sub = event.data.object;
-        const tenantId = sub.metadata?.tenant_id;
         await db.query(
           'UPDATE subscriptions SET status = $1, canceled_at = NOW(), updated_at = NOW() WHERE stripe_subscription_id = $2',
           ['canceled', sub.id]
         );
+
+        // Resolve tenant: prefer metadata, fallback to the subscription record
+        let tenantId = sub.metadata?.tenant_id;
+        if (!tenantId) {
+          const { rows } = await db.query('SELECT tenant_id FROM subscriptions WHERE stripe_subscription_id = $1', [sub.id]);
+          tenantId = rows[0]?.tenant_id;
+        }
 
         // Stop IMAP workers for this tenant
         if (tenantId) {

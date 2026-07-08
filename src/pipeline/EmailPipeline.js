@@ -38,9 +38,10 @@ export const EmailPipeline = {
         return;
       }
     } catch (err) {
-      logger.error(`[Pipeline][${account.email}] Subscription check failed: ${err.message}`);
-      // On DB error, reject and let retry handle it
-      throw err;
+      // On a transient DB error during the subscription check, DO NOT drop the
+      // email (it was already marked \Seen in IMAP and would be lost). Fail open:
+      // log and continue processing so a paying customer's lead is never lost.
+      logger.error(`[Pipeline][${account.email}] Subscription check failed (proceeding to avoid lead loss): ${err.message}`);
     }
 
     const email = parseRaw(parsedMail);

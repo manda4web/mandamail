@@ -26,7 +26,24 @@ export const ContactResolver = {
     const contacts = res?.CONTACT ?? [];
     if (contacts.length > 0) {
       // Use first contact if multiple found (Req 8.2)
-      return { contactId: contacts[0], wasCreated: false };
+      const contactId = contacts[0];
+      // If we have a phone (e.g. OLX lead) and the existing contact has none,
+      // add it so the contact stays complete.
+      if (email.phone) {
+        try {
+          const existing = await bx.call('crm.contact.get', { id: contactId });
+          const hasPhone = Array.isArray(existing?.PHONE) && existing.PHONE.length > 0;
+          if (!hasPhone) {
+            await bx.call('crm.contact.update', {
+              id: contactId,
+              fields: { PHONE: [{ VALUE: email.phone, VALUE_TYPE: 'WORK' }] },
+            });
+          }
+        } catch (e) {
+          // Non-fatal: contact resolution should not fail because of phone update
+        }
+      }
+      return { contactId, wasCreated: false };
     }
 
     // Contact not found — create new one (Req 8.3)

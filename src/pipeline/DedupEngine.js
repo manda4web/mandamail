@@ -21,8 +21,11 @@ export const DedupEngine = {
       }
     }
 
-    // 2. Check by subject + from_email if subject is non-empty (2-minute window, case-insensitive)
-    if (email.subject) {
+    // 2. Check by subject + from_email (2-minute window, case-insensitive).
+    // SKIP for OLX accounts: all OLX leads come from noreply@olx.com.br with
+    // near-identical subjects, so this heuristic would wrongly drop distinct
+    // leads that arrive close together. OLX relies on message_id dedup only.
+    if (account.parser_type !== 'olx' && email.subject) {
       const found = await EmailEventRepo.findBySubjectFrom(account.id, email.subject, email.fromEmail);
       if (found && found.id !== currentEventId) {
         return true;
