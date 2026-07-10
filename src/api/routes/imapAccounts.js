@@ -422,8 +422,14 @@ export default async function imapAccountsRoutes(fastify) {
 
     const updated = await ImapAccountRepo.update(accountId, data);
 
-    // Restart worker if connection settings changed
-    if (data.host || data.port || data.password || data.username || data.use_ssl !== undefined) {
+    // Restart worker if ANY setting that affects monitoring changed. This
+    // includes connection details AND how/where/how-often we poll, otherwise
+    // changes to interval/mode/folder would not take effect until an app restart.
+    if (
+      data.host || data.port || data.password || data.username ||
+      data.use_ssl !== undefined || data.poll_mode || data.poll_interval_sec ||
+      data.mailbox || data.parser_type
+    ) {
       await TenantScheduler.stopAccount(accountId);
       const refreshed = await ImapAccountRepo.findById(accountId);
       if (refreshed && refreshed.active) {
