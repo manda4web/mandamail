@@ -13,6 +13,8 @@ export class ImapListener {
     this.maxRetries = 5;
     this.baseDelay = 5000; // 5 seconds
     this.connectionLost = false;
+    this.uidFailCounts = new Map(); // uid -> consecutive failure count
+    this.maxUidFails = 3;
   }
 
   async start() {
@@ -251,13 +253,25 @@ export class ImapListener {
         try {
           await EmailPipeline.process(this.account, parsed);
           await this._markSeen(msg.uid);
+          this.uidFailCounts.delete(msg.uid);
           // Advance the cursor only AFTER the pipeline persisted/handled the
           // email, so a transient failure doesn't skip a lead.
           await this._saveCursor(uidValidity, msg.uid);
         } catch (err) {
-          // process() throws only on catastrophic failure (e.g. DB down). Do
-          // NOT advance the cursor — retry this UID on the next cycle.
-          logger.error(`[IMAP][${this.account.email}] error processing uid=${msg.uid} (will retry): ${err.message}`);
+          // process() throws only on catastrophic failure (e.g. DB down or a
+          // malformed email Postgres rejects). Retry a few times; if it keeps
+          // failing it's a poison message — skip it so it doesn't block every
+          // subsequent lead in the mailbox.
+          const fails = (this.uidFailCounts.get(msg.uid) || 0) + 1;
+          this.uidFailCounts.set(msg.uid, fails);
+          if (fails >= this.maxUidFails) {
+            logger.error(`[IMAP][${this.account.email}] uid=${msg.uid} failed ${fails}x (poison, skipping): ${err.message}`);
+            this.uidFailCounts.delete(msg.uid);
+            await this._markSeen(msg.uid);
+            await this._saveCursor(uidValidity, msg.uid);
+            continue;
+          }
+          logger.error(`[IMAP][${this.account.email}] error processing uid=${msg.uid} (attempt ${fails}, will retry): ${err.message}`);
           break;
         }
       }

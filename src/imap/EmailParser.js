@@ -136,6 +136,21 @@ function escapeRegex(str) {
 }
 
 /**
+ * Removes NUL bytes (\u0000) from a string. PostgreSQL cannot store NUL bytes
+ * in text/varchar columns ("invalid byte sequence for encoding UTF8: 0x00"),
+ * and some emails (especially with broken encodings) contain them. Stripping
+ * them prevents a single malformed email from blocking the whole mailbox.
+ * @param {string|null} str
+ * @returns {string|null}
+ */
+function stripNull(str) {
+  if (typeof str !== 'string') return str;
+  // Remove NUL and other control chars that are invalid in Postgres text
+  // (keep \t, \n, \r which are valid and meaningful).
+  return str.replace(/\u0000/g, '').replace(/[\x01-\x08\x0B\x0C\x0E-\x1F]/g, '');
+}
+
+/**
  * Parses the output of mailparser's simpleParser into a structured EmailEventData object.
  *
  * @param {Object} parsed - The output of mailparser's simpleParser
@@ -259,15 +274,15 @@ export function parseRaw(parsed) {
   const date = parsed.date || new Date();
 
   return {
-    messageId,
-    fromEmail,
-    fromName,
-    replyTo,
-    subject,
-    bodyHtml,
-    bodyText,
-    toEmails,
-    ccEmails,
+    messageId: stripNull(messageId),
+    fromEmail: stripNull(fromEmail),
+    fromName: stripNull(fromName),
+    replyTo: stripNull(replyTo),
+    subject: stripNull(subject),
+    bodyHtml: stripNull(bodyHtml),
+    bodyText: stripNull(bodyText),
+    toEmails: toEmails.map(stripNull),
+    ccEmails: ccEmails.map(stripNull),
     attachments,
     attachmentCount: attachments.length,
     inlineImages,
