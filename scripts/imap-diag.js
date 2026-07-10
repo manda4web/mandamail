@@ -25,7 +25,8 @@ console.log('Connected OK. Configured mailbox:', acc.mailbox);
 
 // List all folders
 console.log('\n=== FOLDERS ===');
-for await (const box of client.list()) {
+const boxes = await client.list();
+for (const box of boxes) {
   console.log(` - ${box.path}${box.specialUse ? ' ' + box.specialUse : ''}`);
 }
 
