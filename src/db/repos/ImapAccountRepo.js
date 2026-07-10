@@ -295,6 +295,20 @@ export async function updateLastPoll(id, error = null) {
 }
 
 /**
+ * Persist the IMAP UID processing cursor for an account.
+ * @param {string} id - IMAP account UUID
+ * @param {number} uidValidity - Mailbox UIDVALIDITY value
+ * @param {number} lastUid - Highest processed UID
+ * @returns {Promise<void>}
+ */
+export async function updateUidState(id, uidValidity, lastUid) {
+  await db.query(
+    'UPDATE imap_accounts SET uid_validity = $1, last_seen_uid = $2 WHERE id = $3',
+    [uidValidity, lastUid, id]
+  );
+}
+
+/**
  * Count active IMAP accounts for a tenant.
  * @param {string} tenantId - Tenant UUID
  * @returns {Promise<number>}

@@ -120,15 +120,15 @@ export class ImapListener {
   }
 
   async _runIdle() {
-    // Do NOT hold a mailbox lock across the idle loop — _fetchUnseen acquires
+    // Do NOT hold a mailbox lock across the idle loop — _fetchNew acquires
     // its own short-lived lock. Holding it here would deadlock the re-entrant
-    // lock acquisition inside _fetchUnseen (ImapFlow locks are not re-entrant).
-    await this._fetchUnseen();
+    // lock acquisition inside _fetchNew (ImapFlow locks are not re-entrant).
+    await this._fetchNew();
 
     // Use exists event for new messages
     this.client.on('exists', async () => {
       if (this._alive()) {
-        await this._fetchUnseen();
+        await this._fetchNew();
       }
     });
 
@@ -143,14 +143,60 @@ export class ImapListener {
 
   async _runPoll() {
     while (this._alive()) {
-      await this._fetchUnseen();
+      await this._fetchNew();
       if (!this._alive()) break;
       await ImapAccountRepo.updateLastPoll(this.account.id, null);
       await this._sleep(this.account.poll_interval_sec * 1000);
     }
   }
 
-  async _fetchUnseen() {
+  /**
+   * Resolve the UID cursor to start fetching from. Uses the persisted cursor
+   * when UIDVALIDITY still matches; otherwise initializes it to only cover the
+   * last few days (recovers recent leads without reprocessing the whole folder;
+   * the DB dedup layer prevents duplicate deals for already-processed emails).
+   */
+  async _resolveCursor(uidValidity) {
+    const acc = this.account;
+    if (acc.last_seen_uid != null && Number(acc.uid_validity) === uidValidity) {
+      return Number(acc.last_seen_uid);
+    }
+
+    const INIT_WINDOW_DAYS = 3;
+    let startCursor;
+    try {
+      const since = new Date(Date.now() - INIT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+      const uids = await this.client.search({ since }, { uid: true });
+      if (uids && uids.length > 0) {
+        startCursor = Math.min(...uids) - 1;
+      } else {
+        startCursor = Number(this.client.mailbox.uidNext || 1) - 1;
+      }
+    } catch {
+      startCursor = Number(this.client.mailbox.uidNext || 1) - 1;
+    }
+
+    await this._saveCursor(uidValidity, startCursor);
+    logger.info(`[IMAP][${this.account.email}] UID cursor initialized at ${startCursor} (uidValidity=${uidValidity})`);
+    return startCursor;
+  }
+
+  async _saveCursor(uidValidity, cursor) {
+    this.account.uid_validity = uidValidity;
+    this.account.last_seen_uid = cursor;
+    try {
+      await ImapAccountRepo.updateUidState(this.account.id, uidValidity, cursor);
+    } catch (e) {
+      logger.warn(`[IMAP][${this.account.email}] failed to persist UID cursor: ${e.message}`);
+    }
+  }
+
+  /**
+   * Fetch and process messages with UID greater than the stored cursor.
+   * Independent of the \Seen flag, so leads are never missed just because the
+   * email was opened/read elsewhere (phone, Gmail web, etc.).
+   */
+  async _fetchNew() {
     if (!this.client?.usable) {
       this.connectionLost = true;
       return;
@@ -160,23 +206,35 @@ export class ImapListener {
       lock = await this.client.getMailboxLock(this.account.mailbox);
     } catch (err) {
       // Failure to acquire the lock almost always means the connection died.
-      logger.error(`[IMAP][${this.account.email}] fetchUnseen error: ${err.message}`);
+      logger.error(`[IMAP][${this.account.email}] fetchNew lock error: ${err.message}`);
       this.connectionLost = true;
       return;
     }
 
     try {
+      const uidValidity = Number(this.client.mailbox?.uidValidity || 0);
+      let cursor = await this._resolveCursor(uidValidity);
+
+      // Fetch messages with UID strictly greater than the cursor. The `*` in a
+      // UID range can return the highest message even when the range start is
+      // beyond it, so we explicitly filter msg.uid > cursor.
       const messages = [];
-      for await (const msg of this.client.fetch({ seen: false }, { source: true })) {
-        messages.push(msg);
+      for await (const msg of this.client.fetch(
+        `${cursor + 1}:*`,
+        { uid: true, source: true },
+        { uid: true }
+      )) {
+        if (msg.uid > cursor) messages.push(msg);
       }
+      messages.sort((a, b) => a.uid - b.uid);
 
       for (const msg of messages) {
-        // Skip emails larger than 20MB to prevent memory issues.
-        // These will never parse well, so mark seen to avoid re-fetching.
+        if (!this._alive()) break;
+
+        // Oversized message — skip and advance cursor (will never parse well).
         if (msg.source && msg.source.length > 20_000_000) {
-          logger.warn(`[IMAP][${this.account.email}] skipping oversized message (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
-          await this._markSeen(msg.uid);
+          logger.warn(`[IMAP][${this.account.email}] skipping oversized message uid=${msg.uid} (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
+          await this._saveCursor(uidValidity, msg.uid);
           continue;
         }
 
@@ -184,26 +242,27 @@ export class ImapListener {
         try {
           parsed = await simpleParser(msg.source);
         } catch (parseErr) {
-          // Malformed email — retrying won't help. Mark seen and skip so we
-          // don't loop forever on a poison message.
-          logger.error(`[IMAP][${this.account.email}] parse error (marking seen, skipping): ${parseErr.message}`);
-          await this._markSeen(msg.uid);
+          // Malformed email — retrying won't help. Advance past it.
+          logger.error(`[IMAP][${this.account.email}] parse error uid=${msg.uid} (skipping): ${parseErr.message}`);
+          await this._saveCursor(uidValidity, msg.uid);
           continue;
         }
 
         try {
           await EmailPipeline.process(this.account, parsed);
-          // Only mark seen AFTER the pipeline persisted/handled the email.
-          // If process() throws (e.g. transient DB failure), we leave the
-          // message UNSEEN so it is retried on the next fetch instead of
-          // being silently lost.
           await this._markSeen(msg.uid);
+          // Advance the cursor only AFTER the pipeline persisted/handled the
+          // email, so a transient failure doesn't skip a lead.
+          await this._saveCursor(uidValidity, msg.uid);
         } catch (err) {
-          logger.error(`[IMAP][${this.account.email}] error processing message (left UNSEEN for retry): ${err.message}`);
+          // process() throws only on catastrophic failure (e.g. DB down). Do
+          // NOT advance the cursor — retry this UID on the next cycle.
+          logger.error(`[IMAP][${this.account.email}] error processing uid=${msg.uid} (will retry): ${err.message}`);
+          break;
         }
       }
     } catch (err) {
-      logger.error(`[IMAP][${this.account.email}] fetchUnseen error: ${err.message}`);
+      logger.error(`[IMAP][${this.account.email}] fetchNew error: ${err.message}`);
       // A fetch failure typically means the connection dropped mid-operation.
       if (!this.client?.usable) this.connectionLost = true;
     } finally {
