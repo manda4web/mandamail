@@ -151,6 +151,54 @@ function stripNull(str) {
 }
 
 /**
+ * Extracts data:image URIs embedded in HTML (pasted/inline images) and returns
+ * them as attachment-style file objects {fileName, mimeType, fileData(base64)}.
+ * These images are NOT regular MIME attachments, so without this they would
+ * never be uploaded as real files to the deal — only fragilely inline-rendered.
+ *
+ * @param {string} html
+ * @returns {Array<{fileName:string, mimeType:string, fileData:string}>}
+ */
+export function extractDataUriImageFiles(html) {
+  if (!html) return [];
+  const files = [];
+  let searchFrom = 0;
+  let idx = 0;
+
+  while (true) {
+    const srcIdx = html.indexOf('data:image/', searchFrom);
+    if (srcIdx === -1) break;
+
+    const semiIdx = html.indexOf(';base64,', srcIdx);
+    if (semiIdx === -1) { searchFrom = srcIdx + 11; continue; }
+
+    // Find the end of the base64 data (closing quote or paren)
+    let end = semiIdx + 8;
+    while (end < html.length) {
+      const c = html.charAt(end);
+      if (c === '"' || c === "'" || c === ')' || c === ' ' || c === '\n' || c === '\r' || c === '>') break;
+      end++;
+    }
+
+    const mimeType = html.slice(srcIdx + 5, semiIdx); // after "data:"
+    const base64Data = html.slice(semiIdx + 8, end).replace(/\s/g, '');
+
+    if (base64Data.length > 0) {
+      idx++;
+      const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+      files.push({
+        fileName: `imagem_${idx}.${ext}`,
+        mimeType,
+        fileData: base64Data,
+      });
+    }
+    searchFrom = end;
+  }
+
+  return files;
+}
+
+/**
  * Parses the output of mailparser's simpleParser into a structured EmailEventData object.
  *
  * @param {Object} parsed - The output of mailparser's simpleParser
@@ -268,7 +316,11 @@ export function parseRaw(parsed) {
     }
   }
 
-  const attachments = [...regularAttachments, ...inlineAttachments];
+  // Images pasted directly into the body as data: URIs are not MIME attachments,
+  // so extract them and treat them as real files too (uploaded to the deal).
+  const bodyImageFiles = extractDataUriImageFiles(bodyHtml);
+
+  const attachments = [...regularAttachments, ...inlineAttachments, ...bodyImageFiles];
 
   // Extract date
   const date = parsed.date || new Date();
