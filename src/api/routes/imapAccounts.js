@@ -208,6 +208,18 @@ export default async function imapAccountsRoutes(fastify) {
       return reply.code(404).send({ error: 'IMAP account not found' });
     }
 
+    // Restart the worker so the new mapping (field_mapping, stage, attachment
+    // field, etc.) is picked up immediately instead of only after a restart.
+    try {
+      await TenantScheduler.stopAccount(accountId);
+      const refreshed = await ImapAccountRepo.findById(accountId);
+      if (refreshed && refreshed.active) {
+        await TenantScheduler.startAccount(refreshed);
+      }
+    } catch (e) {
+      request.log.warn(`Failed to restart worker after mapping update: ${e.message}`);
+    }
+
     // Remove password from response
     const { password_enc, ...safe } = updated;
     return reply.send(safe);

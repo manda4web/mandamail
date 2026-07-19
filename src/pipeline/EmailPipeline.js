@@ -180,11 +180,42 @@ export const EmailPipeline = {
     const activityId = await ActivityWriter.write(tenant, email, dealId, contactId, account.email);
     apiLog.activity = { activityId };
 
-    // Attachments (Req 11)
+    // Attachments (Req 11). Includes files pasted into the body (data: URIs),
+    // which the parser now exposes as real attachments.
     if (email.attachments && email.attachments.length > 0) {
       const bx = new BitrixClient(tenant);
-      const attResults = await uploadAttachments(bx, dealId, email.attachments);
-      apiLog.attachments = attResults;
+      const attachmentField = tenant.field_mapping && tenant.field_mapping.attachment_field;
+
+      if (attachmentField) {
+        // Route attachments into a configured deal file field (UF_CRM_*),
+        // preserving any files already present on the deal.
+        try {
+          const files = email.attachments
+            .filter(a => a.fileData)
+            .map(a => ({ fileData: [a.fileName, a.fileData] }));
+
+          if (files.length > 0) {
+            let existing = [];
+            try {
+              const deal = await bx.call('crm.deal.get', { id: dealId });
+              const cur = deal ? deal[attachmentField] : null;
+              if (Array.isArray(cur)) existing = cur.map(f => f.id || f.ID).filter(Boolean);
+            } catch { /* new deal or unreadable — start fresh */ }
+
+            const fieldsUpd = {};
+            fieldsUpd[attachmentField] = [...existing, ...files];
+            await bx.call('crm.deal.update', { id: dealId, fields: fieldsUpd });
+            apiLog.attachments = { field: attachmentField, added: files.length, kept: existing.length };
+            logger.info(`[Pipeline] ${files.length} anexo(s) enviados ao campo ${attachmentField} do deal ${dealId}`);
+          }
+        } catch (err) {
+          logger.warn(`[Pipeline] falha ao anexar no campo ${attachmentField}, usando timeline: ${err.message}`);
+          apiLog.attachments = await uploadAttachments(bx, dealId, email.attachments);
+        }
+      } else {
+        const attResults = await uploadAttachments(bx, dealId, email.attachments);
+        apiLog.attachments = attResults;
+      }
     }
 
     // Mark success (Req 12)
