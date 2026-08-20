@@ -1,21 +1,29 @@
 import { db } from '../../db/client.js';
 import logger from '../../logger.js';
 
-const ADMIN_DOMAIN = 'manda4.bitrix24.com.br';
+const ADMIN_DOMAIN = process.env.ADMIN_PORTAL_DOMAIN || 'manda4.bitrix24.com.br';
 
 /**
- * Middleware: only allow access from the admin portal (manda4.bitrix24.com.br)
+ * Middleware: only allow access from the admin portal (manda4.bitrix24.com.br).
+ * Hostname comparison is EXACT (no substring) across ALL the user's tenants.
  */
 async function requireAdmin(request, reply) {
   if (!request.user) {
     return reply.code(401).send({ error: 'Authentication required' });
   }
-  // Check if the user's tenant is the admin portal
   const { rows } = await db.query(
-    'SELECT bitrix_url FROM tenants WHERE id = (SELECT tenant_id FROM user_tenants WHERE user_id = $1 LIMIT 1)',
+    `SELECT t.bitrix_url FROM tenants t
+     JOIN user_tenants ut ON ut.tenant_id = t.id
+     WHERE ut.user_id = $1`,
     [request.user.id]
   );
-  const isAdmin = rows.some(r => r.bitrix_url && r.bitrix_url.includes(ADMIN_DOMAIN));
+  const isAdmin = rows.some(r => {
+    try {
+      return new URL(r.bitrix_url).hostname === ADMIN_DOMAIN;
+    } catch {
+      return false;
+    }
+  });
   if (!isAdmin && request.user.role !== 'admin') {
     return reply.code(403).send({ error: 'Admin access required' });
   }

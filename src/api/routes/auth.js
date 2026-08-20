@@ -6,6 +6,11 @@ import { SubscriptionRepo } from '../../db/repos/SubscriptionRepo.js';
 import logger from '../../logger.js';
 
 const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || 'comercial@manda4.com.br';
+// The super-admin identity is only trusted when the request comes from the
+// official admin portal (and, when configured, the exact member_id) — the
+// iframe body is client-controlled, so the email alone must never grant it.
+const ADMIN_PORTAL_DOMAIN = process.env.ADMIN_PORTAL_DOMAIN || 'manda4.bitrix24.com.br';
+const SUPER_ADMIN_MEMBER_ID = process.env.SUPER_ADMIN_MEMBER_ID || '';
 
 /**
  * Registers the authentication routes on the Fastify instance.
@@ -154,8 +159,18 @@ export default async function authRoutes(fastify) {
     const effectiveDisplayName = userName || null;
     const effectiveIsBitrixAdmin = isBitrixAdmin === true;
 
-    // Check if this is the super-admin email
-    const isSuperAdmin = effectiveEmail.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+    // Check if this is the super-admin: email match is only honored when the
+    // request comes from the official admin portal (domain + optional
+    // member_id pinning) — a random portal claiming the email gets nothing.
+    const emailMatches = effectiveEmail.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+    const fromAdminPortal = domain === ADMIN_PORTAL_DOMAIN
+      && (!SUPER_ADMIN_MEMBER_ID || member_id === SUPER_ADMIN_MEMBER_ID);
+    const isSuperAdmin = emailMatches && fromAdminPortal;
+    if (isSuperAdmin) {
+      logger.info({ domain, member_id }, 'Super-admin access granted (pinned to admin portal)');
+    } else if (emailMatches && !fromAdminPortal) {
+      logger.warn({ domain, member_id }, 'Super-admin email presented from NON-admin portal — denied');
+    }
 
     // Find existing user by Bitrix user ID + tenant, or by email
     let user = null;

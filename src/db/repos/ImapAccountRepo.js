@@ -1,15 +1,24 @@
 import { db } from '../client.js';
 import { encrypt, decrypt } from '../../crypto/passwords.js';
+import logger from '../../logger.js';
 
 /**
  * Removes password_enc from a row and adds the decrypted password field.
+ * A single corrupted password_enc must not reject the whole batch (it used
+ * to take down every worker at once) — the account gets password:null and
+ * TenantScheduler skips it with a clear error.
  * @param {Object} row - Database row with password_enc
  * @returns {Object} Row with password field instead of password_enc
  */
 function decryptRow(row) {
   if (!row) return null;
   const { password_enc, ...rest } = row;
-  return { ...rest, password: decrypt(password_enc) };
+  try {
+    return { ...rest, password: decrypt(password_enc) };
+  } catch (err) {
+    logger.error(`[ImapAccountRepo] decrypt failed for account ${row.id} (${row.email}): ${err.message}`);
+    return { ...rest, password: null };
+  }
 }
 
 /**

@@ -35,6 +35,16 @@ export const TenantScheduler = {
       return;
     }
 
+    // A corrupted/unreadable stored password must disable ONLY this account —
+    // failing here (instead of at connect time) keeps the other workers alive.
+    if (!account.password) {
+      logger.error(`[Scheduler] cannot start ${account.email}: stored password could not be decrypted (re-save the account credentials)`);
+      try {
+        await ImapAccountRepo.updateLastPoll(account.id, 'senha não pôde ser descriptografada — re-salve as credenciais da conta');
+      } catch { /* observability only */ }
+      return;
+    }
+
     const worker = new ImapListener(account);
     workers.set(account.id, worker);
 
@@ -147,6 +157,18 @@ export const TenantScheduler = {
     this._supervisorTimer = setInterval(async () => {
       try {
         const accounts = await ImapAccountRepo.findAllActive();
+        const activeIds = new Set(accounts.map(a => a.id));
+
+        // Stop workers whose account/tenant was deactivated after they started
+        // (the PATCH routes can't be the only line of defense — they may fail
+        // or be bypassed by direct DB changes).
+        for (const [id] of [...workers.entries()]) {
+          if (!activeIds.has(id)) {
+            logger.warn(`[Scheduler][Supervisor] stopping worker of deactivated account ${id}`);
+            await this.stopAccount(id);
+          }
+        }
+
         for (const account of accounts) {
           const existing = workers.get(account.id);
           const alive = existing && existing.running;

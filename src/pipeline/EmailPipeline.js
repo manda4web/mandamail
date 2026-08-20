@@ -15,11 +15,13 @@ import logger from '../logger.js';
 
 export const EmailPipeline = {
   async process(account, parsedMail) {
-    // STEP 0: Verify active plan before any processing
+    // STEP 0: Verify active plan AND monthly email quota before any processing
     try {
       const access = await SubscriptionRepo.checkAccess(account.tenant_id);
-      if (!access.allowed) {
-        logger.warn(`[Pipeline][${account.email}] PLANO_INATIVO tenant=${account.tenant_id} reason=${access.reason}`);
+      const quota = await SubscriptionRepo.checkQuota(account.tenant_id);
+      if (!access.allowed || !quota.allowed) {
+        const reason = !access.allowed ? access.reason : quota.reason;
+        logger.warn(`[Pipeline][${account.email}] PLANO_INATIVO tenant=${account.tenant_id} reason=${reason}`);
         // Save event with PLANO_INATIVO status (no further processing)
         const email = parseRaw(parsedMail);
         await EmailEventRepo.create({

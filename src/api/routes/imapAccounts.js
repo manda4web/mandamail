@@ -1,5 +1,6 @@
 import * as ImapAccountRepo from '../../db/repos/ImapAccountRepo.js';
 import * as TenantRepo from '../../db/repos/TenantRepo.js';
+import { SubscriptionRepo } from '../../db/repos/SubscriptionRepo.js';
 import { TenantScheduler } from '../../imap/TenantScheduler.js';
 import { requireTenantAccess } from '../middleware/auth.js';
 import logger from '../../logger.js';
@@ -64,11 +65,16 @@ export default async function imapAccountsRoutes(fastify) {
   }, async (request, reply) => {
     const { id: tenantId } = request.params;
 
-    // Enforce 50 account limit per tenant
+    // Enforce the plan's IMAP account limit (fallback 50)
+    let imapLimit = 50;
+    try {
+      const sub = await SubscriptionRepo.findByTenantId(tenantId);
+      if (sub && sub.imap_limit) imapLimit = sub.imap_limit;
+    } catch { /* plan lookup failure must not block account creation */ }
     const currentCount = await ImapAccountRepo.countByTenant(tenantId);
-    if (currentCount >= 50) {
+    if (currentCount >= imapLimit) {
       return reply.code(400).send({
-        error: 'Maximum account limit reached. A tenant can have at most 50 IMAP accounts.',
+        error: `Maximum account limit reached. A tenant can have at most ${imapLimit} IMAP accounts.`,
       });
     }
 
@@ -97,7 +103,9 @@ export default async function imapAccountsRoutes(fastify) {
       logger.error({ accountId: account.id, err: err.message }, 'Failed to start IMAP worker after account creation');
     }
 
-    return reply.code(201).send(account);
+    // Never return the stored ciphertext
+    const { password_enc, ...safeAccount } = account;
+    return reply.code(201).send(safeAccount);
   });
 
   /**
@@ -321,7 +329,8 @@ export default async function imapAccountsRoutes(fastify) {
       await TenantScheduler.stopAccount(accountId);
     }
 
-    return reply.send(updated);
+    const { password_enc, ...safeToggle } = updated;
+    return reply.send(safeToggle);
   });
 
   /**
@@ -435,12 +444,13 @@ export default async function imapAccountsRoutes(fastify) {
     const updated = await ImapAccountRepo.update(accountId, data);
 
     // Restart worker if ANY setting that affects monitoring changed. This
-    // includes connection details AND how/where/how-often we poll, otherwise
-    // changes to interval/mode/folder would not take effect until an app restart.
+    // includes connection details, poll behavior AND the active flag
+    // (deactivating via this route must stop the worker), otherwise changes
+    // would not take effect until an app restart.
     if (
       data.host || data.port || data.password || data.username ||
       data.use_ssl !== undefined || data.poll_mode || data.poll_interval_sec ||
-      data.mailbox || data.parser_type
+      data.mailbox || data.parser_type || data.active !== undefined
     ) {
       await TenantScheduler.stopAccount(accountId);
       const refreshed = await ImapAccountRepo.findById(accountId);
@@ -449,8 +459,10 @@ export default async function imapAccountsRoutes(fastify) {
       }
     }
 
-    // Remove password from response
-    const { password, ...safe } = updated || {};
+    // Remove BOTH the ciphertext and the decrypted password — update() with
+    // an empty/no-op body short-circuits to findById(), which returns the
+    // decrypted shape
+    const { password, password_enc, ...safe } = updated || {};
     return safe;
   });
 }

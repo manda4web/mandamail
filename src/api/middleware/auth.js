@@ -66,3 +66,28 @@ export async function requireTenantAccess(request, reply) {
     return reply.code(403).send({ error: 'Access denied to this tenant' });
   }
 }
+
+/**
+ * Fastify preHandler for routes where the tenant comes from request.body
+ * (e.g. /stripe/checkout with { tenant_id }) instead of the URL params.
+ * Behaves like requireTenantAccess but reads body.tenant_id.
+ */
+export async function requireTenantBodyAccess(request, reply) {
+  if (!request.user) {
+    return reply.code(401).send({ error: 'Authentication required' });
+  }
+
+  if (request.user.role === 'admin') {
+    return;
+  }
+
+  const tenantId = request.body?.tenant_id;
+  if (!tenantId) {
+    return reply.code(400).send({ error: 'tenant_id is required' });
+  }
+
+  const hasAccess = await UserRepo.hasAccessToTenant(request.user.id, tenantId);
+  if (!hasAccess) {
+    return reply.code(403).send({ error: 'Access denied to this tenant' });
+  }
+}

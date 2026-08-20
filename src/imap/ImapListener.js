@@ -217,63 +217,87 @@ export class ImapListener {
       const uidValidity = Number(this.client.mailbox?.uidValidity || 0);
       let cursor = await this._resolveCursor(uidValidity);
 
-      // Fetch messages with UID strictly greater than the cursor. The `*` in a
-      // UID range can return the highest message even when the range start is
-      // beyond it, so we explicitly filter msg.uid > cursor.
-      const messages = [];
-      for await (const msg of this.client.fetch(
-        `${cursor + 1}:*`,
-        { uid: true, source: true },
-        { uid: true }
-      )) {
-        if (msg.uid > cursor) messages.push(msg);
-      }
-      messages.sort((a, b) => a.uid - b.uid);
-
-      for (const msg of messages) {
-        if (!this._alive()) break;
-
-        // Oversized message — skip and advance cursor (will never parse well).
-        if (msg.source && msg.source.length > 20_000_000) {
-          logger.warn(`[IMAP][${this.account.email}] skipping oversized message uid=${msg.uid} (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
-          await this._saveCursor(uidValidity, msg.uid);
-          continue;
+      // Process in FINITE UID windows instead of fetching `cursor+1:*` whole.
+      // Two reasons:
+      // (a) memory stays bounded per window (a big backlog used to be
+      //     materialized whole in RAM, risking OOM for all tenants at once);
+      // (b) the imapflow fetch iterator MUST be drained to completion —
+      //     breaking out of the for-await wedges the connection (the pending
+      //     FETCH never completes and every later command hangs until the
+      //     socket timeout). A finite range always drains.
+      // A full window means there is probably more backlog: loop again. A
+      // finite UID range returns nothing when the start is beyond the last
+      // message, so the loop terminates naturally; msg.uid > cursor is kept
+      // as a defensive filter.
+      const WINDOW = 25;
+      let stop = false;
+      while (!stop && this._alive()) {
+        const batch = [];
+        for await (const msg of this.client.fetch(
+          `${cursor + 1}:${cursor + WINDOW}`,
+          { uid: true, source: true },
+          { uid: true }
+        )) {
+          if (msg.uid > cursor) batch.push(msg);
+        }
+        batch.sort((a, b) => a.uid - b.uid);
+        const fullWindow = batch.length >= WINDOW;
+        if (fullWindow) {
+          logger.info(`[IMAP][${this.account.email}] backlog: full window of ${WINDOW} msgs processed, fetching next`);
         }
 
-        let parsed;
-        try {
-          parsed = await simpleParser(msg.source);
-        } catch (parseErr) {
-          // Malformed email — retrying won't help. Advance past it.
-          logger.error(`[IMAP][${this.account.email}] parse error uid=${msg.uid} (skipping): ${parseErr.message}`);
-          await this._saveCursor(uidValidity, msg.uid);
-          continue;
-        }
+        for (const msg of batch) {
+          if (!this._alive()) { stop = true; break; }
 
-        try {
-          await EmailPipeline.process(this.account, parsed);
-          await this._markSeen(msg.uid);
-          this.uidFailCounts.delete(msg.uid);
-          // Advance the cursor only AFTER the pipeline persisted/handled the
-          // email, so a transient failure doesn't skip a lead.
-          await this._saveCursor(uidValidity, msg.uid);
-        } catch (err) {
-          // process() throws only on catastrophic failure (e.g. DB down or a
-          // malformed email Postgres rejects). Retry a few times; if it keeps
-          // failing it's a poison message — skip it so it doesn't block every
-          // subsequent lead in the mailbox.
-          const fails = (this.uidFailCounts.get(msg.uid) || 0) + 1;
-          this.uidFailCounts.set(msg.uid, fails);
-          if (fails >= this.maxUidFails) {
-            logger.error(`[IMAP][${this.account.email}] uid=${msg.uid} failed ${fails}x (poison, skipping): ${err.message}`);
-            this.uidFailCounts.delete(msg.uid);
-            await this._markSeen(msg.uid);
+          // Oversized message — skip and advance cursor (will never parse well).
+          if (msg.source && msg.source.length > 20_000_000) {
+            logger.warn(`[IMAP][${this.account.email}] skipping oversized message uid=${msg.uid} (${Math.round(msg.source.length / 1024 / 1024)}MB)`);
             await this._saveCursor(uidValidity, msg.uid);
+            cursor = msg.uid;
             continue;
           }
-          logger.error(`[IMAP][${this.account.email}] error processing uid=${msg.uid} (attempt ${fails}, will retry): ${err.message}`);
-          break;
+
+          let parsed;
+          try {
+            parsed = await simpleParser(msg.source);
+          } catch (parseErr) {
+            // Malformed email — retrying won't help. Advance past it.
+            logger.error(`[IMAP][${this.account.email}] parse error uid=${msg.uid} (skipping): ${parseErr.message}`);
+            await this._saveCursor(uidValidity, msg.uid);
+            cursor = msg.uid;
+            continue;
+          }
+
+          try {
+            await EmailPipeline.process(this.account, parsed);
+            await this._markSeen(msg.uid);
+            this.uidFailCounts.delete(msg.uid);
+            // Advance the cursor only AFTER the pipeline persisted/handled the
+            // email, so a transient failure doesn't skip a lead.
+            await this._saveCursor(uidValidity, msg.uid);
+            cursor = msg.uid;
+          } catch (err) {
+            // process() throws only on catastrophic failure (e.g. DB down or a
+            // malformed email Postgres rejects). Retry a few times; if it keeps
+            // failing it's a poison message — skip it so it doesn't block every
+            // subsequent lead in the mailbox.
+            const fails = (this.uidFailCounts.get(msg.uid) || 0) + 1;
+            this.uidFailCounts.set(msg.uid, fails);
+            if (fails >= this.maxUidFails) {
+              logger.error(`[IMAP][${this.account.email}] uid=${msg.uid} failed ${fails}x (poison, skipping): ${err.message}`);
+              this.uidFailCounts.delete(msg.uid);
+              await this._markSeen(msg.uid);
+              await this._saveCursor(uidValidity, msg.uid);
+              cursor = msg.uid;
+              continue;
+            }
+            logger.error(`[IMAP][${this.account.email}] error processing uid=${msg.uid} (attempt ${fails}, will retry): ${err.message}`);
+            stop = true;
+            break;
+          }
         }
+
+        if (!fullWindow) break; // backlog exhausted
       }
     } catch (err) {
       logger.error(`[IMAP][${this.account.email}] fetchNew error: ${err.message}`);

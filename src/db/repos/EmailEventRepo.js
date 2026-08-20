@@ -51,6 +51,12 @@ export const EmailEventRepo = {
       sets.push('processed_at = NOW()');
     }
 
+    if (status === 'PROCESSANDO') {
+      // Restart the staleness clock every time processing (re)starts —
+      // long-backoff retries would be falsely flagged as stale otherwise.
+      sets.push('processing_started_at = NOW()');
+    }
+
     if (extra.incrementRetry) {
       sets.push('retry_count = retry_count + 1');
     }
@@ -78,7 +84,7 @@ export const EmailEventRepo = {
     const { rows } = await db.query(
       `SELECT id FROM email_events
        WHERE imap_account_id = $1
-         AND LOWER(subject) = LOWER($2)
+         AND LOWER(BTRIM(subject)) = LOWER(BTRIM($2))
          AND LOWER(from_email) = LOWER($3)
          AND created_at > NOW() - INTERVAL '2 minutes'
        LIMIT 1`,
@@ -125,7 +131,7 @@ export const EmailEventRepo = {
               ) AS has_pending_retry
        FROM email_events e
        WHERE (
-            (status = 'PROCESSANDO' AND created_at < NOW() - ($1 || ' minutes')::INTERVAL)
+            (status = 'PROCESSANDO' AND COALESCE(e.processing_started_at, e.created_at) < NOW() - ($1 || ' minutes')::INTERVAL)
             OR (
               status = 'RECEBIDO'
               AND created_at < NOW() - ($2 || ' minutes')::INTERVAL
@@ -136,6 +142,20 @@ export const EmailEventRepo = {
             )
           )`,
       [processingMinutes, receivedMinutes]
+    );
+    return rows;
+  },
+
+  /**
+   * Events that reached FALHA_DEFINITIVA recently (alert trigger — a lost
+   * lead must notify someone regardless of SLA timers).
+   */
+  async findRecentFinalFailures(minutes = 10) {
+    const { rows } = await db.query(
+      `SELECT * FROM email_events
+       WHERE status = 'FALHA_DEFINITIVA'
+         AND processed_at > NOW() - ($1 || ' minutes')::INTERVAL`,
+      [minutes]
     );
     return rows;
   },
@@ -194,11 +214,11 @@ export const EmailEventRepo = {
     }
 
     if (endDate) {
-      // Include the entire end day (add 1 day to cover until 23:59:59)
-      const endDatePlusOne = new Date(endDate);
-      endDatePlusOne.setDate(endDatePlusOne.getDate() + 1);
-      conditions.push(`e.created_at < $${paramIndex++}`);
-      params.push(endDatePlusOne.toISOString().slice(0, 10));
+      // Include the entire end day in Brasília time (UTC-3): the raw date
+      // string is midnight UTC, which would drop the 21:00–23:59 BRT window.
+      // date+1day+3h covers the full BRT day regardless of server TZ.
+      conditions.push(`e.created_at < ($${paramIndex++}::date + INTERVAL '1 day' + INTERVAL '3 hours')`);
+      params.push(String(endDate).slice(0, 10));
     }
 
     const whereClause = conditions.join(' AND ');

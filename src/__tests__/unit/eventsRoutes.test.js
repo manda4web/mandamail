@@ -165,6 +165,46 @@ describe('Events Routes', () => {
         expect(response.statusCode).toBe(200);
       }
     });
+
+    it('exports CSV allowing limit above the JSON cap (regression: 400 killed the export button)', async () => {
+      EmailEventRepo.list.mockResolvedValue({
+        data: [{
+          created_at: '2026-08-20T10:00:00Z', status: 'SUCESSO', from_email: 'a@x.com',
+          from_name: 'A', subject: '=SUM(A1)', account_email: 'acc@x.com',
+          bitrix_deal_id: 1, bitrix_contact_id: 2, retry_count: 0,
+        }],
+        total: 1, page: 1, limit: 5000, totalPages: 1,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/tenants/tenant-123/events?limit=5000&page=1&format=csv',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toContain('text/csv');
+      expect(response.body).toContain('created_at,status,from_email');
+      // Formula injection neutralized (= prefixed with ')
+      expect(response.body).toContain("'=SUM(A1)");
+      expect(EmailEventRepo.list).toHaveBeenCalledWith(expect.objectContaining({ limit: 5000 }));
+    });
+
+    it('still rejects limit>100 for JSON responses', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/tenants/tenant-123/events?limit=5000',
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('rejects a non-UUID account_id with 400 instead of a Postgres 500', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/tenants/tenant-123/events?account_id=foo',
+      });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toMatch(/account_id/i);
+    });
   });
 
   describe('GET /tenants/:id/dashboard', () => {

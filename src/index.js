@@ -22,6 +22,12 @@ async function main() {
     process.exit(1);
   }
 
+  // /auth/bitrix auto-creates tenants/users — without the app token check it
+  // trusts any request. Warn loudly so it never runs unprotected by accident.
+  if (!process.env.BITRIX_APP_TOKEN) {
+    logger.warn('BITRIX_APP_TOKEN not configured — /auth/bitrix accepts unverified install requests (tenant/user farming risk)');
+  }
+
   // 2. Test database connection
   try {
     await db.query('SELECT 1');

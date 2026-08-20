@@ -224,6 +224,26 @@ describe('imapAccountsRoutes', () => {
     });
   });
 
+  describe('PATCH /tenants/:id/imap-accounts/:accountId (general update)', () => {
+    it('never leaks the decrypted password when update() short-circuits to findById()', async () => {
+      // Regression: update({}) returns findById()'s decrypted shape, which
+      // used to include the plaintext password in the HTTP response.
+      ImapAccountRepo.findById.mockResolvedValue({ id: 'acc-1', tenant_id: 'tenant-1' });
+      ImapAccountRepo.update.mockResolvedValue({ id: 'acc-1', tenant_id: 'tenant-1', email: 'a@t.com', password: 'PLAINTEXT-SECRET' });
+
+      const reply = createMockReply();
+      const result = await routes['PATCH /tenants/:id/imap-accounts/:accountId'](
+        { params: { id: 'tenant-1', accountId: 'acc-1' }, body: {} },
+        reply
+      );
+
+      // handler returns the sanitized object directly (Fastify serializes it)
+      expect(result).not.toHaveProperty('password');
+      expect(result).not.toHaveProperty('password_enc');
+      expect(result.email).toBe('a@t.com');
+    });
+  });
+
   describe('DELETE /tenants/:id/imap-accounts/:accountId', () => {
     it('stops worker, deletes account and its data, returns 204', async () => {
       ImapAccountRepo.findById.mockResolvedValue({ id: 'acc-1', tenant_id: 'tenant-1' });

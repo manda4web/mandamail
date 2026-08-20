@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import { db } from '../../db/client.js';
 import { TenantScheduler } from '../../imap/TenantScheduler.js';
+import { authenticate, requireTenantBodyAccess } from '../middleware/auth.js';
 import logger from '../../logger.js';
 
 // Instantiate with a placeholder when the key is missing so the app can boot
@@ -13,13 +14,34 @@ if (!stripeSecretKey) {
 const stripe = new Stripe(stripeSecretKey || 'MISSING_STRIPE_KEY_PLACEHOLDER');
 
 /**
- * Stripe routes: checkout session creation and webhook handling.
- * Webhook route is public (no auth) — verified by Stripe signature.
+ * Maps a raw Stripe subscription status to the app's subscription status
+ * (CHECK constraint: trial/active/canceled/past_due/expired). Unknown values
+ * degrade to past_due (keeps the 7-day grace) instead of crashing the UPDATE.
+ */
+export function mapStripeStatus(rawStatus) {
+  const map = {
+    active: 'active',
+    trialing: 'trial',
+    past_due: 'past_due',
+    unpaid: 'past_due',
+    incomplete: 'past_due',
+    incomplete_expired: 'canceled',
+    canceled: 'canceled',
+    paused: 'past_due',
+  };
+  return map[rawStatus] || 'past_due';
+}
+
+/**
+ * Stripe routes. Only the webhook is public (verified by Stripe signature);
+ * checkout/portal/cancel handle money and require JWT + tenant ownership.
  */
 export default async function stripeRoutes(fastify) {
 
   // POST /stripe/checkout — Create a Stripe Checkout Session
-  fastify.post('/stripe/checkout', async (request, reply) => {
+  fastify.post('/stripe/checkout', {
+    preHandler: [authenticate, requireTenantBodyAccess],
+  }, async (request, reply) => {
     const { plan_id, billing_cycle, tenant_id, coupon_code } = request.body || {};
 
     if (!plan_id || !tenant_id) {
@@ -187,10 +209,10 @@ export default async function stripeRoutes(fastify) {
 
       case 'customer.subscription.updated': {
         const sub = event.data.object;
-        const status = sub.status === 'active' ? 'active' : sub.status === 'past_due' ? 'past_due' : sub.status;
+        const mapped = mapStripeStatus(sub.status);
         await db.query(
           'UPDATE subscriptions SET status = $1, current_period_start = $2, current_period_end = $3, updated_at = NOW() WHERE stripe_subscription_id = $4',
-          [status, sub.current_period_start ? new Date(sub.current_period_start * 1000) : null, sub.current_period_end ? new Date(sub.current_period_end * 1000) : null, sub.id]
+          [mapped, sub.current_period_start ? new Date(sub.current_period_start * 1000) : null, sub.current_period_end ? new Date(sub.current_period_end * 1000) : null, sub.id]
         );
 
         // Resolve tenant: prefer metadata, fallback to the subscription record
@@ -202,15 +224,16 @@ export default async function stripeRoutes(fastify) {
 
         if (tenantId) {
           try {
-            if (status === 'active') {
+            if (mapped === 'active' || mapped === 'trial' || mapped === 'past_due') {
+              // past_due keeps running during the 7-day grace (checkAccess)
               await TenantScheduler.startTenant(tenantId);
-            } else if (status === 'canceled' || status === 'unpaid' || status === 'incomplete_expired') {
-              await TenantScheduler.handleSubscriptionInactive(tenantId, status);
+            } else {
+              await TenantScheduler.handleSubscriptionInactive(tenantId, mapped);
             }
           } catch (err) {
             logger.error(`[Stripe] Worker update failed for tenant ${tenantId}: ${err.message}`);
           }
-          logger.info({ tenant_id: tenantId, status }, '[Stripe] Subscription updated');
+          logger.info({ tenant_id: tenantId, status: mapped, raw: sub.status }, '[Stripe] Subscription updated');
         }
         break;
       }
@@ -256,7 +279,9 @@ export default async function stripeRoutes(fastify) {
   });
 
   // GET /stripe/portal — Create a Stripe Customer Portal session
-  fastify.post('/stripe/portal', async (request, reply) => {
+  fastify.post('/stripe/portal', {
+    preHandler: [authenticate, requireTenantBodyAccess],
+  }, async (request, reply) => {
     const { tenant_id } = request.body || {};
     if (!tenant_id) return reply.code(400).send({ error: 'tenant_id required' });
 
@@ -277,7 +302,9 @@ export default async function stripeRoutes(fastify) {
   });
 
   // POST /stripe/cancel — Cancel a subscription (stop billing at period end)
-  fastify.post('/stripe/cancel', async (request, reply) => {
+  fastify.post('/stripe/cancel', {
+    preHandler: [authenticate, requireTenantBodyAccess],
+  }, async (request, reply) => {
     const { tenant_id, immediate } = request.body || {};
     if (!tenant_id) return reply.code(400).send({ error: 'tenant_id required' });
 

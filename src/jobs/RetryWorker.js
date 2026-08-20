@@ -9,6 +9,7 @@ export class RetryWorker {
   constructor() {
     this.intervalId = null;
     this.running = false;
+    this._cycleInFlight = false; // guards overlapping 30s ticks
   }
 
   start() {
@@ -28,6 +29,13 @@ export class RetryWorker {
   }
 
   async _runPending() {
+    // A cycle can easily exceed 30s (IMAP refetch + Bitrix calls); a new tick
+    // must not start a parallel run over the same pending jobs.
+    if (this._cycleInFlight) {
+      logger.warn('[RetryWorker] previous cycle still running, skipping tick');
+      return;
+    }
+    this._cycleInFlight = true;
     try {
       await this._recoverStale();
 
@@ -41,6 +49,8 @@ export class RetryWorker {
       }
     } catch (err) {
       logger.error(`[RetryWorker] error polling jobs: ${err.message}`);
+    } finally {
+      this._cycleInFlight = false;
     }
   }
 

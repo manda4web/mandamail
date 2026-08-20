@@ -1,9 +1,33 @@
 import { requireRole, requireTenantAccess } from '../middleware/auth.js';
 import * as TenantRepo from '../../db/repos/TenantRepo.js';
 import * as ImapAccountRepo from '../../db/repos/ImapAccountRepo.js';
+import { SubscriptionRepo } from '../../db/repos/SubscriptionRepo.js';
 import { TenantScheduler } from '../../imap/TenantScheduler.js';
 import { BitrixClient } from '../../bitrix/BitrixClient.js';
 import { ImapFlow } from 'imapflow';
+import logger from '../../logger.js';
+
+/**
+ * Blocks connection tests against internal/private network targets (SSRF
+ * mitigation for test-bitrix / test-imap, which accept arbitrary hosts).
+ */
+function assertPublicHost(host) {
+  const h = String(host || '').toLowerCase().trim();
+  const blocked =
+    h === 'localhost' ||
+    h === '::1' ||
+    h.endsWith('.internal') ||
+    h.endsWith('.local') ||
+    /^127\./.test(h) ||
+    /^10\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^169\.254\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    /^0\./.test(h);
+  if (blocked) {
+    throw new Error('Host interno não é permitido em testes de conexão');
+  }
+}
 
 /**
  * Registers tenant management routes on the Fastify instance.
@@ -55,12 +79,22 @@ export async function tenantsRoutes(fastify) {
     }
 
     const tenant = await TenantRepo.create(request.body);
+
+    // Every tenant starts with a trial subscription (same as /auth/bitrix
+    // installs) — without it checkAccess returns NO_SUBSCRIPTION and the
+    // tenant's workers never start.
+    try {
+      await SubscriptionRepo.createTrial(tenant.id);
+    } catch (err) {
+      logger.error({ tenantId: tenant.id, error: err.message }, 'Failed to create trial for new tenant');
+    }
+
     return reply.code(201).send(tenant);
   });
 
   // PATCH /tenants/:id — update tenant fields
   fastify.patch('/tenants/:id', {
-    preHandler: [requireRole('admin', 'tenant_user')],
+    preHandler: [requireRole('admin', 'tenant_user'), requireTenantAccess],
   }, async (request, reply) => {
     const { id } = request.params;
 
@@ -84,15 +118,25 @@ export async function tenantsRoutes(fastify) {
 
     const updated = await TenantRepo.update(id, data);
 
-    // If bitrix_url or bitrix_webhook_token changed, restart workers for this tenant
     const urlChanged = data.bitrix_url && data.bitrix_url !== existing.bitrix_url;
     const tokenChanged = data.bitrix_webhook_token && data.bitrix_webhook_token !== existing.bitrix_webhook_token;
+    // Behavior fields the running workers hold as a snapshot from startup —
+    // filters, mapping and deal mode only take effect after a worker restart.
+    const behaviorChanged = [
+      'ignore_from', 'ignore_subject', 'field_mapping', 'deal_mode',
+      'sync_start_date', 'bitrix_category_id', 'bitrix_stage_id', 'bitrix_responsible_id',
+    ].some(f => data[f] !== undefined && JSON.stringify(data[f]) !== JSON.stringify(existing[f]));
 
-    if (urlChanged || tokenChanged) {
+    if (data.active === false) {
+      // Deactivating the tenant stops its workers (spec Req 1.5)
       await TenantScheduler.stopTenant(id);
-      const accounts = await ImapAccountRepo.findAllActiveByTenant(id);
-      for (const account of accounts) {
-        await TenantScheduler.startAccount(account);
+    } else if (data.active === true || urlChanged || tokenChanged || behaviorChanged) {
+      // (Re)start workers so they pick up the new configuration.
+      await TenantScheduler.stopTenant(id);
+      try {
+        await TenantScheduler.startTenant(id);
+      } catch (err) {
+        logger.error({ tenantId: id, error: err.message }, 'Failed to restart workers after tenant update');
       }
     }
 
@@ -116,6 +160,7 @@ export async function tenantsRoutes(fastify) {
     }
 
     try {
+      assertPublicHost(new URL(bitrix_url).hostname);
       const client = new BitrixClient({ bitrix_url, bitrix_webhook_token });
       // Override timeout to 10s for test connection
       client.timeout = 10000;
@@ -146,6 +191,12 @@ export async function tenantsRoutes(fastify) {
           ...(!password ? ['password'] : []),
         ],
       });
+    }
+
+    try {
+      assertPublicHost(host);
+    } catch (err) {
+      return reply.code(400).send({ success: false, error: err.message });
     }
 
     let imapClient;

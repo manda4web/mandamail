@@ -40,11 +40,21 @@ export class AlertService {
     if (alertConfigs.length === 0) return;
 
     const minSla = Math.min(...alertConfigs.map(a => a.sla_minutes));
-    const stuck = await EmailEventRepo.findStuck(tenantId, minSla);
+    let stuck = await EmailEventRepo.findStuck(tenantId, minSla);
+
+    // FALHA_DEFINITIVA is not "stuck" (it's final) — but a lost lead must
+    // alert immediately regardless of SLA (spec Req 15.6).
+    try {
+      const failures = await EmailEventRepo.findRecentFinalFailures(this.checkIntervalSec / 60 + 1);
+      const tenantFailures = failures.filter(e => e.tenant_id === tenantId);
+      stuck = stuck.concat(tenantFailures);
+    } catch { /* non-fatal */ }
+
     if (stuck.length === 0) return;
 
     for (const alert of alertConfigs) {
       const relevant = stuck.filter(e => {
+        if (e.status === 'FALHA_DEFINITIVA') return true; // always alert
         const ageMin = (Date.now() - new Date(e.created_at).getTime()) / 60_000;
         return ageMin >= alert.sla_minutes;
       });
@@ -89,7 +99,7 @@ export class AlertService {
   }
 
   async _sendWebhook(alert, events) {
-    await fetch(alert.destination, {
+    const res = await fetch(alert.destination, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -106,6 +116,9 @@ export class AlertService {
       }),
       signal: AbortSignal.timeout(10_000),
     });
+    // fetch only rejects on network errors — an HTTP 4xx/5xx is a failed
+    // delivery and must go through the retry logic (spec Req 15.8).
+    if (!res.ok) throw new Error(`webhook responded HTTP ${res.status}`);
   }
 
   async _sendSlack(alert, events) {
@@ -113,7 +126,7 @@ export class AlertService {
       `• *${e.from_email}* — ${e.subject} (${e.status}, ${Math.round((Date.now() - new Date(e.created_at)) / 60_000)}min)`
     ).join('\n');
 
-    await fetch(alert.destination, {
+    const res = await fetch(alert.destination, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -121,6 +134,7 @@ export class AlertService {
       }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (!res.ok) throw new Error(`slack webhook responded HTTP ${res.status}`);
   }
 
   async _sendEmail(alert, events) {

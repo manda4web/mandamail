@@ -82,11 +82,18 @@ export const SubscriptionRepo = {
 
     switch (sub.status) {
       case 'active': {
-        if (sub.current_period_end && new Date(sub.current_period_end) > now) {
+        if (!sub.current_period_end || new Date(sub.current_period_end) > now) {
           return { allowed: true, reason: 'ACTIVE' };
         }
-        // Period ended but status not updated yet — still allow (webhook may be delayed)
-        return { allowed: true, reason: 'ACTIVE' };
+        // Period ended but the webhook hasn't arrived yet — allow a short
+        // grace (3 days) so a delayed webhook doesn't cut a paying customer,
+        // but never let a LOST webhook keep service on forever.
+        const graceEnd = new Date(sub.current_period_end);
+        graceEnd.setDate(graceEnd.getDate() + 3);
+        if (now <= graceEnd) {
+          return { allowed: true, reason: 'ACTIVE_GRACE' };
+        }
+        return { allowed: false, reason: 'ACTIVE_PERIOD_ENDED' };
       }
 
       case 'trial': {
@@ -119,5 +126,27 @@ export const SubscriptionRepo = {
       default:
         return { allowed: false, reason: 'UNKNOWN_STATUS' };
     }
+  },
+
+  /**
+   * Checks the tenant's monthly email quota against the plan's email_limit
+   * (NULL limit = unlimited). Counted from email_events of the current month.
+   * @returns {Promise<{allowed: boolean, reason: string, used?: number, limit?: number}>}
+   */
+  async checkQuota(tenantId) {
+    const sub = await this.findByTenantId(tenantId);
+    if (!sub) return { allowed: true, reason: 'NO_SUBSCRIPTION' };
+    if (!sub.email_limit) return { allowed: true, reason: 'UNLIMITED' };
+
+    const { rows } = await db.query(
+      `SELECT COUNT(*)::int AS used FROM email_events
+       WHERE tenant_id = $1 AND created_at >= date_trunc('month', NOW())`,
+      [tenantId]
+    );
+    const used = rows[0].used;
+    if (used >= sub.email_limit) {
+      return { allowed: false, reason: 'EMAIL_LIMIT', used, limit: sub.email_limit };
+    }
+    return { allowed: true, reason: 'OK', used, limit: sub.email_limit };
   },
 };

@@ -158,6 +158,46 @@ export class BitrixClient {
         }
 
         const data = await response.json();
+
+        // Bitrix24 frequently answers HTTP 200 with an application-level
+        // error body ({error, error_description}). Treating that as success
+        // caused duplicate contacts and invalid deal/activity ids.
+        if (data && data.error && data.result === undefined) {
+          const errCode = String(data.error);
+
+          // Expired OAuth token in a 200 body — same recovery as the 401 path
+          if (errCode === 'EXPIRED_TOKEN' && this.authId && this.tenant && this.tenant.refresh_id && !this._refreshed) {
+            const refreshed = await this._refreshToken();
+            if (refreshed) {
+              this._refreshed = true;
+              return this.call(method, params);
+            }
+          }
+
+          const transientApiErrors = [
+            'QUERY_LIMIT_EXCEEDED',
+            'AUTHORIZER_ERROR',
+            'INTERNAL_SERVER_ERROR',
+            'SOCKET_IO_ERROR',
+          ];
+          if (transientApiErrors.includes(errCode)) {
+            lastError = new BitrixError(
+              `Bitrix24 API transient error: ${errCode} - ${data.error_description || ''}`,
+              { type: 'transient', statusCode: 200, attempts: attempt }
+            );
+            logger.warn({ method, errCode, attempt }, 'Transient API error, retrying...');
+            if (attempt < this.maxAttempts) {
+              await this._delay(this.retryDelay);
+            }
+            continue;
+          }
+
+          throw new BitrixError(
+            `Bitrix24 API error: ${errCode} - ${data.error_description || ''}`,
+            { type: 'non-transient', statusCode: 200, attempts: attempt }
+          );
+        }
+
         return data.result !== undefined ? data.result : data;
       } catch (error) {
         if (error instanceof BitrixError && error.type === 'non-transient') {

@@ -24,6 +24,9 @@ export function buildApp() {
     logger: {
       level: process.env.LOG_LEVEL || 'info',
     },
+    // Behind the Caddy reverse proxy: honor X-Forwarded-For so the rate
+    // limit is per-client instead of one global bucket for everybody.
+    trustProxy: true,
     // Limit body size to 25MB (for emails with large inline images)
     bodyLimit: 25 * 1024 * 1024,
   });
@@ -48,9 +51,11 @@ export function buildApp() {
     max: 200, // 200 requests per minute per IP
     timeWindow: '1 minute',
     keyGenerator: (request) => request.ip,
-    // Don't rate limit Bitrix app routes (they make multiple requests on load)
+    // Don't rate limit static Bitrix app routes (they make multiple requests on load).
+    // NOTE: /auth/bitrix is intentionally NOT allowlisted — it auto-creates
+    // tenants/trials/users and must stay under the global rate limit.
     allowList: (request) => {
-      return request.url.startsWith('/bitrix/') || request.url.startsWith('/auth/bitrix');
+      return request.url.startsWith('/bitrix/') || request.url.startsWith('/assets/');
     },
   });
 
@@ -82,7 +87,10 @@ export function buildApp() {
   // Public routes (no auth required)
   app.register(authRoutes);
   app.register(bitrixAppRoutes);
-  app.register(stripeRoutes); // Stripe webhook is public (verified by signature)
+  app.register(stripeRoutes); // webhook is public (verified by signature); checkout/portal/cancel carry their own auth preHandlers
+
+  // Liveness probe for the Docker healthcheck / monitoring
+  app.get('/health', async () => ({ status: 'ok', uptime: process.uptime() }));
 
   // Protected routes (require authentication)
   app.register(async function protectedRoutes(protectedApp) {
@@ -106,7 +114,8 @@ export function buildApp() {
     }
 
     reply.status(statusCode).send({
-      error: error.message || 'Internal Server Error',
+      // Don't leak internal error details (SQL, paths) on server errors
+      error: statusCode >= 500 ? 'Erro interno do servidor' : (error.message || 'Error'),
       statusCode,
     });
   });

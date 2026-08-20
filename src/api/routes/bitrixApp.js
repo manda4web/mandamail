@@ -122,7 +122,12 @@ function buildAppHtml(data) {
     server_endpoint: data.server_endpoint,
     application_token: data.application_token,
     auth_expires: data.auth_expires,
-  });
+  })
+    // Prevent closing the <script> tag from inside the JSON (reflected XSS
+    // via the public DOMAIN query param) — escape HTML-significant chars.
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
 
   const parts = [];
   parts.push('<!DOCTYPE html>');
@@ -1273,7 +1278,7 @@ function getAppJsDashboard() {
     '  document.getElementById("dash-last-update").textContent = "Atualizado às " + new Date().toLocaleTimeString("pt-BR", {hour:"2-digit",minute:"2-digit"});',
     '',
     '  var periodDays = dashPeriod === "today" ? 1 : dashPeriod === "7d" ? 7 : 30;',
-    '  var eventsLimit = dashPeriod === "today" ? 50 : dashPeriod === "7d" ? 100 : 200;',
+    '  var eventsLimit = dashPeriod === "today" ? 50 : 100;',
     '',
     '  // --- Load dashboard stats and compute comparisons ---',
     '  api("GET", "/tenants/" + currentTenantId + "/dashboard").then(function(stats) {',
@@ -2904,7 +2909,20 @@ function getAppJsBoot() {
     'document.getElementById("btn-save-mapping").addEventListener("click", saveMapping);',
     '',
     '// Settings: data management buttons',
-    'if (document.getElementById("btn-export-data")) document.getElementById("btn-export-data").addEventListener("click", function() { toast("Exportando dados...", "success"); window.open("/tenants/" + currentTenantId + "/events?limit=9999&page=1&format=csv", "_blank"); });',
+    'if (document.getElementById("btn-export-data")) document.getElementById("btn-export-data").addEventListener("click", function() {\n' +
+    '  toast("Exportando dados...", "success");\n' +
+    '  // Direct fetch with the JWT + download as blob — window.open() had no Authorization header and broke on limit>100\n' +
+    '  fetch("/tenants/" + currentTenantId + "/events?limit=5000&page=1&format=csv", { headers: { "Authorization": "Bearer " + getToken() } })\n' +
+    '  .then(function(res) { if (!res.ok) throw new Error("HTTP " + res.status); return res.text(); })\n' +
+    '  .then(function(csv) {\n' +
+    '    var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });\n' +
+    '    var a = document.createElement("a");\n' +
+    '    a.href = URL.createObjectURL(blob);\n' +
+    '    a.download = "eventos-mandamail.csv";\n' +
+    '    document.body.appendChild(a); a.click(); document.body.removeChild(a);\n' +
+    '    URL.revokeObjectURL(a.href);\n' +
+    '  }).catch(function(e) { toast("Erro ao exportar: " + (e.message || ""), "error"); });\n' +
+    '});',
     'if (document.getElementById("btn-clear-old-logs")) document.getElementById("btn-clear-old-logs").addEventListener("click", function() { if (!confirm("Limpar logs com mais de 30 dias? Esta ação não pode ser desfeita.")) return; toast("Limpeza agendada. O sistema limpa automaticamente a cada 24h.", "success"); });',
     'if (document.getElementById("btn-reset-config")) document.getElementById("btn-reset-config").addEventListener("click", function() { if (!confirm("Resetar todas as configurações de filtros para o padrão?")) return; api("PATCH", "/tenants/" + currentTenantId, { ignore_from: [], ignore_subject: [] }).then(function() { toast("Configurações resetadas", "success"); loadSettings(); }).catch(function(e) { toast(e.message, "error"); }); });',
     'if (document.getElementById("btn-delete-all-data")) document.getElementById("btn-delete-all-data").addEventListener("click", function() { toast("Entre em contato com suporte@manda4.com.br para deletar todos os dados.", "error"); });',

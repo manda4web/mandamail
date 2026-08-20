@@ -11,6 +11,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Liveness: a hung app (blocked event loop) keeps the port open but fails
+    # the probe, so Docker restarts it instead of serving errors forever.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3000}/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   postgres:

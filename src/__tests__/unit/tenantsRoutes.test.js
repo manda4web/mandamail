@@ -25,6 +25,7 @@ vi.mock('../../db/repos/ImapAccountRepo.js', () => ({
 vi.mock('../../imap/TenantScheduler.js', () => ({
   TenantScheduler: {
     stopTenant: vi.fn(),
+    startTenant: vi.fn(),
     startAccount: vi.fn(),
     status: vi.fn(),
   },
@@ -172,7 +173,6 @@ describe('tenantsRoutes', () => {
       TenantRepo.findById.mockResolvedValue(existing);
       TenantRepo.findByBitrixUrl.mockResolvedValue(null);
       TenantRepo.update.mockResolvedValue({ ...existing, bitrix_url: 'https://new.bitrix24.com' });
-      ImapAccountRepo.findAllActiveByTenant.mockResolvedValue([{ id: 'acc1' }, { id: 'acc2' }]);
 
       const request = {
         params: { id: 't1' },
@@ -181,9 +181,7 @@ describe('tenantsRoutes', () => {
       await routes['PATCH /tenants/:id'](request, reply);
 
       expect(TenantScheduler.stopTenant).toHaveBeenCalledWith('t1');
-      expect(TenantScheduler.startAccount).toHaveBeenCalledTimes(2);
-      expect(TenantScheduler.startAccount).toHaveBeenCalledWith({ id: 'acc1' });
-      expect(TenantScheduler.startAccount).toHaveBeenCalledWith({ id: 'acc2' });
+      expect(TenantScheduler.startTenant).toHaveBeenCalledWith('t1');
     });
 
     it('updates tenant and restarts workers if bitrix_webhook_token changes', async () => {
