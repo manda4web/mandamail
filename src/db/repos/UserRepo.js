@@ -56,7 +56,9 @@ export const UserRepo = {
 
   async findTenantsByUser(userId) {
     const { rows } = await db.query(
-      'SELECT tenant_id, role, is_admin FROM user_tenants WHERE user_id = $1',
+      // Ordered so the "primary" tenant (first one granted) is deterministic
+      // across logins — /auth/login embeds tenants[0] in the JWT.
+      'SELECT tenant_id, role, is_admin FROM user_tenants WHERE user_id = $1 ORDER BY granted_at ASC',
       [userId]
     );
     return rows;

@@ -10,6 +10,7 @@ process.env.JWT_EXPIRES_IN = '2h';
 vi.mock('../../db/repos/UserRepo.js', () => ({
   UserRepo: {
     findByEmail: vi.fn(),
+    findTenantsByUser: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -95,6 +96,49 @@ describe('POST /auth/login', () => {
     expect(decoded.id).toBe('user-1');
     expect(decoded.email).toBe('user@test.com');
     expect(decoded.role).toBe('admin');
+  });
+
+  it('includes tenant_id in the token when the user belongs to a tenant', async () => {
+    const passwordHash = await bcrypt.hash('correct-password', 10);
+    UserRepo.findByEmail.mockResolvedValue({
+      id: 'user-9',
+      email: 'tenantuser@test.com',
+      password_hash: passwordHash,
+      role: 'tenant_user',
+    });
+    UserRepo.findTenantsByUser.mockResolvedValue([
+      { tenant_id: 'tenant-9', role: 'owner', is_admin: true },
+    ]);
+
+    const request = { body: { email: 'tenantuser@test.com', password: 'correct-password' } };
+    const reply = createMockReply();
+
+    await handler(request, reply);
+
+    const decoded = jwt.verify(reply.body.token, 'test-secret-key-for-unit-tests');
+    expect(decoded.tenant_id).toBe('tenant-9');
+    expect(decoded.is_admin).toBe(true);
+    expect(decoded.is_super_admin).toBe(false);
+  });
+
+  it('issues token with null tenant_id when the user has no tenants', async () => {
+    const passwordHash = await bcrypt.hash('correct-password', 10);
+    UserRepo.findByEmail.mockResolvedValue({
+      id: 'user-10',
+      email: 'lonely@test.com',
+      password_hash: passwordHash,
+      role: 'tenant_user',
+    });
+    UserRepo.findTenantsByUser.mockResolvedValue([]);
+
+    const request = { body: { email: 'lonely@test.com', password: 'correct-password' } };
+    const reply = createMockReply();
+
+    await handler(request, reply);
+
+    const decoded = jwt.verify(reply.body.token, 'test-secret-key-for-unit-tests');
+    expect(decoded.tenant_id).toBeNull();
+    expect(decoded.is_admin).toBe(false);
   });
 
   it('issues token with correct expiration from env var', async () => {

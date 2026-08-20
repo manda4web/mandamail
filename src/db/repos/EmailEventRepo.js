@@ -1,15 +1,16 @@
 import { db } from '../client.js';
 
-const FINAL_STATUSES = ['SUCESSO', 'ERRO', 'FALHA_DEFINITIVA', 'DUPLICADO', 'IGNORADO'];
+const FINAL_STATUSES = ['SUCESSO', 'ERRO', 'FALHA_DEFINITIVA', 'DUPLICADO', 'IGNORADO', 'PLANO_INATIVO'];
 
 export const EmailEventRepo = {
   async create(data) {
+    const status = data.status || 'RECEBIDO';
     const { rows } = await db.query(
       `INSERT INTO email_events (
         tenant_id, imap_account_id, message_id, from_email, from_name,
         reply_to, subject, body_html, body_text, to_emails, cc_emails,
-        attachment_count, status, received_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        attachment_count, status, received_at, processed_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *`,
       [
         data.tenant_id,
@@ -24,8 +25,11 @@ export const EmailEventRepo = {
         JSON.stringify(data.to_emails || []),
         JSON.stringify(data.cc_emails || []),
         data.attachment_count || 0,
-        data.status || 'RECEBIDO',
+        status,
         data.received_at || new Date(),
+        // Events created directly in a final status (e.g. PLANO_INATIVO)
+        // are done the moment they exist.
+        FINAL_STATUSES.includes(status) ? new Date() : null,
       ]
     );
     return rows[0];
@@ -90,6 +94,48 @@ export const EmailEventRepo = {
          AND status IN ('RECEBIDO', 'PROCESSANDO', 'ERRO')
          AND created_at < NOW() - ($2 || ' minutes')::INTERVAL`,
       [tenantId, sinceMinutes]
+    );
+    return rows;
+  },
+
+  /**
+   * Finds events stuck in an in-flight status — the signature of a crash or
+   * killed process mid-processing (normal processing takes seconds).
+   * Uses created_at (ingestion time), NOT received_at (which is the email's
+   * Date header and can be days old on backlog/backfill scenarios — those
+   * events would be falsely flagged as stale the moment they start
+   * processing).
+   *
+   * PROCESSANDO is recovered EVEN when a pending retry job exists — a crash
+   * during a manual reprocess (which sets PROCESSANDO) must not stall the
+   * event forever: the pending job is simply executed once the status is
+   * downgraded back to ERRO. RECEBIDO is only recovered when no job exists,
+   * to avoid double-scheduling.
+   *
+   * @param {number} processingMinutes - stale threshold for PROCESSANDO
+   * @param {number} receivedMinutes - stale threshold for RECEBIDO
+   * @returns {Promise<Array>} stale events (with has_pending_retry flag)
+   */
+  async findStale(processingMinutes = 30, receivedMinutes = 60) {
+    const { rows } = await db.query(
+      `SELECT e.*,
+              EXISTS (
+                SELECT 1 FROM retry_jobs rj
+                WHERE rj.email_event_id = e.id AND rj.success IS NULL
+              ) AS has_pending_retry
+       FROM email_events e
+       WHERE (
+            (status = 'PROCESSANDO' AND created_at < NOW() - ($1 || ' minutes')::INTERVAL)
+            OR (
+              status = 'RECEBIDO'
+              AND created_at < NOW() - ($2 || ' minutes')::INTERVAL
+              AND NOT EXISTS (
+                SELECT 1 FROM retry_jobs rj
+                WHERE rj.email_event_id = e.id AND rj.success IS NULL
+              )
+            )
+          )`,
+      [processingMinutes, receivedMinutes]
     );
     return rows;
   },

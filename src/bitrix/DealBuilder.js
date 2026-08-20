@@ -4,8 +4,14 @@ import logger from '../logger.js';
 const MAX_TITLE_LENGTH = 300;
 
 export const DealBuilder = {
-  async create(tenant, email, contactId) {
-    const bx = new BitrixClient(tenant);
+  /**
+   * @param {Object} tenant - Tenant configuration
+   * @param {Object} email - Email data
+   * @param {number} contactId - Resolved Bitrix24 contact ID
+   * @param {Object} [client] - Shared BitrixClient (created when omitted)
+   */
+  async create(tenant, email, contactId, client) {
+    const bx = client || new BitrixClient(tenant);
 
     // Check deal_mode: merge_by_contact = find existing deal for this contact
     if (tenant.deal_mode === 'merge_by_contact' && contactId) {

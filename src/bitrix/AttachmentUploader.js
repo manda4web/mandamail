@@ -1,6 +1,8 @@
 import logger from '../logger.js';
 
-const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+// Shared limit — also enforced by EmailPipeline when routing attachments to
+// a deal file field (field_mapping.attachment_field).
+export const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
 
 /**
  * Uploads attachments as timeline comments in Bitrix24.

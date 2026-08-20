@@ -129,6 +129,11 @@ export class AlertService {
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT ?? 587),
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      // Timeouts: a slow/hung SMTP server must not block the alert loop
+      // (WEBHOOK/SLACK already use AbortSignal.timeout(10s)).
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 15_000,
     });
 
     const lines = events.map(e =>

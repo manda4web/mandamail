@@ -50,8 +50,30 @@ export default async function authRoutes(fastify) {
       return reply.code(401).send({ error: 'Invalid credentials' });
     }
 
+    // Resolve the user's primary tenant so this token works everywhere the
+    // /auth/bitrix token works (e.g. GET /subscriptions/status reads
+    // request.user.tenant_id). Falls back to null for tenant-less users.
+    let tenantId = null;
+    let isTenantAdmin = false;
+    try {
+      const tenants = await UserRepo.findTenantsByUser(user.id);
+      if (tenants.length > 0) {
+        tenantId = tenants[0].tenant_id;
+        isTenantAdmin = tenants[0].is_admin === true || tenants[0].role === 'owner';
+      }
+    } catch (err) {
+      logger.warn({ userId: user.id, error: err.message }, 'Could not resolve tenant for login token');
+    }
+
     // Issue JWT with user payload
-    const payload = { id: user.id, email: user.email, role: user.role };
+    const payload = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      tenant_id: tenantId,
+      is_admin: user.role === 'admin' || isTenantAdmin,
+      is_super_admin: false,
+    };
     const expiresIn = process.env.JWT_EXPIRES_IN || '8h';
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn });

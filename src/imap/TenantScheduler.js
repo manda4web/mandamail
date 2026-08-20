@@ -62,6 +62,31 @@ export const TenantScheduler = {
     }
   },
 
+  /**
+   * Stops every running worker and the supervisor timer.
+   * Used by graceful shutdown (SIGTERM/SIGINT) so no processing is killed
+   * mid-flight by process.exit.
+   */
+  async stopAll() {
+    if (this._supervisorTimer) {
+      clearInterval(this._supervisorTimer);
+      this._supervisorTimer = null;
+    }
+
+    const entries = [...workers.entries()];
+    let count = 0;
+    for (const [id, worker] of entries) {
+      try {
+        await worker.stop();
+      } catch (err) {
+        logger.error(`[Scheduler] error stopping worker ${id}: ${err.message}`);
+      }
+      workers.delete(id);
+      count++;
+    }
+    logger.info(`[Scheduler] stopped all workers (${count})`);
+  },
+
   async stopTenant(tenantId) {
     let count = 0;
     for (const [id, worker] of workers.entries()) {

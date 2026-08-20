@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { db } from './client.js';
 import logger from '../logger.js';
 
@@ -23,7 +23,13 @@ async function getAppliedMigrations() {
   return new Set(result.rows.map((row) => row.name));
 }
 
-async function run() {
+/**
+ * Applies pending SQL migrations (each file in its own transaction).
+ * Shared by `npm run migrate` and the app startup (src/index.js) — keep it as
+ * the single implementation to avoid drift between the two entry points.
+ * @returns {Promise<number>} number of migrations applied
+ */
+export async function runMigrations() {
   logger.info('Starting database migrations...');
 
   await ensureMigrationsTable();
@@ -70,11 +76,17 @@ async function run() {
   } else {
     logger.info({ count: migrationsRun }, 'All migrations applied successfully');
   }
+
+  return migrationsRun;
 }
 
-run()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    logger.error({ error: err.message }, 'Migration runner failed');
-    process.exit(1);
-  });
+// CLI mode: `npm run migrate` → node src/db/migrate.js
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  runMigrations()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      logger.error({ error: err.message }, 'Migration runner failed');
+      process.exit(1);
+    });
+}

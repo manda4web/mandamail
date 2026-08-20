@@ -149,10 +149,10 @@ describe('Events Routes', () => {
       expect(body.error).toContain('Invalid date format');
     });
 
-    it('accepts all 7 valid status values', async () => {
+    it('accepts all 8 valid status values (incl. PLANO_INATIVO)', async () => {
       const validStatuses = [
         'RECEBIDO', 'PROCESSANDO', 'SUCESSO',
-        'DUPLICADO', 'IGNORADO', 'ERRO', 'FALHA_DEFINITIVA',
+        'DUPLICADO', 'IGNORADO', 'ERRO', 'FALHA_DEFINITIVA', 'PLANO_INATIVO',
       ];
 
       EmailEventRepo.list.mockResolvedValue({ data: [], total: 0, page: 1, limit: 20, totalPages: 0 });

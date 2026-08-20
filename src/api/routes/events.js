@@ -1,5 +1,6 @@
 import { EmailEventRepo } from '../../db/repos/EmailEventRepo.js';
 import { requireRole, requireTenantAccess } from '../middleware/auth.js';
+import { fetchOriginalEmail } from '../../imap/fetchOriginalEmail.js';
 import logger from '../../logger.js';
 
 const VALID_STATUSES = [
@@ -10,6 +11,7 @@ const VALID_STATUSES = [
   'IGNORADO',
   'ERRO',
   'FALHA_DEFINITIVA',
+  'PLANO_INATIVO',
 ];
 
 /**
@@ -98,7 +100,9 @@ export default async function eventsRoutes(fastify) {
     preHandler: [requireTenantAccess],
   }, async (request, reply) => {
     const event = await EmailEventRepo.findById(request.params.eventId);
-    if (!event) return reply.code(404).send({ error: 'Event not found' });
+    if (!event || event.tenant_id !== request.params.id) {
+      return reply.code(404).send({ error: 'Event not found' });
+    }
 
     // Get retry jobs for this event
     const { db } = await import('../../db/client.js');
@@ -121,7 +125,9 @@ export default async function eventsRoutes(fastify) {
     preHandler: [requireTenantAccess],
   }, async (request, reply) => {
     const event = await EmailEventRepo.findById(request.params.eventId);
-    if (!event) return reply.code(404).send({ error: 'Event not found' });
+    if (!event || event.tenant_id !== request.params.id) {
+      return reply.code(404).send({ error: 'Event not found' });
+    }
 
     if (event.status === 'PROCESSANDO') {
       return reply.code(400).send({ error: 'This event is already being processed' });
@@ -134,49 +140,12 @@ export default async function eventsRoutes(fastify) {
     // Reset status to allow reprocessing
     await EmailEventRepo.setStatus(event.id, 'PROCESSANDO');
 
-    // Try to fetch the original email from IMAP (to get attachments)
-    let email;
-    try {
-      const { ImapFlow } = await import('imapflow');
-      const { simpleParser } = await import('mailparser');
-      const { parseRaw } = await import('../../imap/EmailParser.js');
-
-      const imapClient = new ImapFlow({
-        host: account.host,
-        port: account.port || 993,
-        secure: account.use_ssl !== false,
-        auth: { user: account.username, pass: account.password },
-        logger: false,
-        greetTimeout: 15000,
-        socketTimeout: 15000,
-      });
-
-      await imapClient.connect();
-      const lock = await imapClient.getMailboxLock(account.mailbox || 'INBOX');
-
-      try {
-        // Search for the email by Message-ID
-        const uids = await imapClient.search({ header: { 'message-id': event.message_id } });
-
-        if (uids && uids.length > 0) {
-          // Fetch the full email source
-          const msg = await imapClient.fetchOne(uids[0], { source: true }, { uid: true });
-          if (msg && msg.source) {
-            const parsed = await simpleParser(msg.source);
-            email = parseRaw(parsed);
-            logger.info({ eventId: event.id }, 'Reprocess: fetched original email from IMAP with attachments');
-          }
-        }
-      } finally {
-        lock.release();
-        await imapClient.logout();
-      }
-    } catch (imapErr) {
-      logger.warn({ eventId: event.id, error: imapErr.message }, 'Reprocess: could not fetch from IMAP, using stored data');
-    }
-
-    // Fallback: reconstruct from database (without attachments)
-    if (!email) {
+    // Try to fetch the original email from IMAP (to get attachments and the
+    // untruncated body); falls back to the stored DB data.
+    let email = await fetchOriginalEmail(account, event.message_id);
+    if (email) {
+      logger.info({ eventId: event.id }, 'Reprocess: fetched original email from IMAP with attachments');
+    } else {
       email = {
         messageId: event.message_id,
         fromEmail: event.from_email,
@@ -193,7 +162,8 @@ export default async function eventsRoutes(fastify) {
       };
     }
 
-    // Reprocess in background
+    // Reprocess in background — idempotent: a deal/contact/activity already
+    // recorded in bitrix_results for this event is reused, not duplicated.
     const { EmailPipeline } = await import('../../pipeline/EmailPipeline.js');
     EmailPipeline._processInBitrix(account, email, event).catch(async (err) => {
       logger.error({ eventId: event.id, error: err.message }, 'Reprocess failed');

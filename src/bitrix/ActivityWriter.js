@@ -75,8 +75,16 @@ function extractDataUriImages(html) {
 }
 
 export const ActivityWriter = {
-  async write(tenant, email, dealId, contactId, accountEmail) {
-    const bx = new BitrixClient(tenant);
+  /**
+   * @param {Object} tenant - Tenant configuration
+   * @param {Object} email - Email data
+   * @param {number} dealId - Bitrix24 deal ID
+   * @param {number} contactId - Bitrix24 contact ID
+   * @param {string} accountEmail - IMAP account email (for logs)
+   * @param {Object} [client] - Shared BitrixClient (created when omitted)
+   */
+  async write(tenant, email, dealId, contactId, accountEmail, client) {
+    const bx = client || new BitrixClient(tenant);
     let body = email.bodyHtml || email.bodyText || '';
     let dataUriImages = [];
 

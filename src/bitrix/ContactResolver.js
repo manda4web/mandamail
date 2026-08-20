@@ -11,10 +11,11 @@ export const ContactResolver = {
    *
    * @param {Object} tenant - Tenant configuration with bitrix_url and bitrix_webhook_token
    * @param {Object} email - Email data with fromEmail and fromName fields
+   * @param {Object} [client] - Shared BitrixClient (created when omitted)
    * @returns {Promise<{contactId: number, wasCreated: boolean}>}
    */
-  async resolve(tenant, email) {
-    const bx = new BitrixClient(tenant);
+  async resolve(tenant, email, client) {
+    const bx = client || new BitrixClient(tenant);
 
     // Search for existing contact by email (Req 8.1)
     const res = await bx.call('crm.duplicate.findbycomm', {

@@ -17,3 +17,11 @@ export const db = {
   query: (text, params) => pool.query(text, params),
   getClient: () => pool.connect(),
 };
+
+/**
+ * Closes the pool gracefully on shutdown.
+ * @returns {Promise<void>}
+ */
+export async function endPool() {
+  await pool.end();
+}

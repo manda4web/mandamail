@@ -1,9 +1,10 @@
 import 'dotenv/config';
-import { db } from './db/client.js';
+import { db, endPool } from './db/client.js';
 import { buildApp } from './api/server.js';
 import { TenantScheduler } from './imap/TenantScheduler.js';
 import { RetryWorker } from './jobs/RetryWorker.js';
 import { AlertService } from './alerts/AlertService.js';
+import { runMigrations } from './db/migrate.js';
 import { loadEncryptionKey } from './crypto/passwords.js';
 import logger from './logger.js';
 
@@ -42,58 +43,9 @@ async function main() {
     process.exit(1);
   }
 
-  // 4. Run database migrations
+  // 4. Run database migrations (shared runner with `npm run migrate`)
   try {
-    const { readdir, readFile } = await import('node:fs/promises');
-    const { join, dirname } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const MIGRATIONS_DIR = join(__dirname, 'db', 'migrations');
-
-    // Ensure migrations table exists
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS _migrations (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        applied_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `);
-
-    const applied = await db.query('SELECT name FROM _migrations ORDER BY name');
-    const appliedSet = new Set(applied.rows.map((row) => row.name));
-
-    const files = await readdir(MIGRATIONS_DIR);
-    const sqlFiles = files.filter((f) => f.endsWith('.sql')).sort();
-
-    let migrationsRun = 0;
-    for (const file of sqlFiles) {
-      if (appliedSet.has(file)) continue;
-
-      const filePath = join(MIGRATIONS_DIR, file);
-      const sql = await readFile(filePath, 'utf-8');
-
-      const client = await db.getClient();
-      try {
-        await client.query('BEGIN');
-        await client.query(sql);
-        await client.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
-        await client.query('COMMIT');
-        migrationsRun++;
-        logger.info(`[Startup] Migration applied: ${file}`);
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
-    }
-
-    if (migrationsRun === 0) {
-      logger.info('[Startup] No new migrations to apply');
-    } else {
-      logger.info(`[Startup] ${migrationsRun} migration(s) applied`);
-    }
+    await runMigrations();
   } catch (err) {
     logger.fatal(`Database migration failed: ${err.message}`);
     process.exit(1);
@@ -141,13 +93,28 @@ async function main() {
   // 10. Log startup complete
   logger.info('=== Application startup complete — ready to accept requests ===');
 
-  // Graceful shutdown
+  // Graceful shutdown — stops every background worker so no processing is
+  // killed mid-flight, with a hard timeout as a safety net.
   const shutdown = async (signal) => {
     logger.info(`[Shutdown] Received ${signal}, shutting down gracefully...`);
-    alertService.stop();
-    retryWorker.stop();
-    await app.close();
-    logger.info('[Shutdown] Complete');
+    const forceTimer = setTimeout(() => {
+      logger.error('[Shutdown] timed out after 15s, forcing exit');
+      process.exit(1);
+    }, 15000);
+    forceTimer.unref?.();
+
+    try {
+      alertService.stop();
+      retryWorker.stop();
+      cleanupWorker.stop();
+      await TenantScheduler.stopAll();
+      await app.close();
+      await endPool();
+      logger.info('[Shutdown] Complete');
+    } catch (err) {
+      logger.error(`[Shutdown] error during shutdown: ${err.message}`);
+    }
+    clearTimeout(forceTimer);
     process.exit(0);
   };
 

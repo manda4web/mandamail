@@ -3,7 +3,14 @@ import { db } from '../../db/client.js';
 import { TenantScheduler } from '../../imap/TenantScheduler.js';
 import logger from '../../logger.js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// Instantiate with a placeholder when the key is missing so the app can boot
+// (Stripe routes fail at call time with a clear error instead of crashing
+// startup/tests in environments without billing configured).
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+if (!stripeSecretKey) {
+  logger.warn('STRIPE_SECRET_KEY not configured — Stripe billing routes will fail until it is set');
+}
+const stripe = new Stripe(stripeSecretKey || 'MISSING_STRIPE_KEY_PLACEHOLDER');
 
 /**
  * Stripe routes: checkout session creation and webhook handling.

@@ -35,6 +35,19 @@ export function isTransientError(statusCode) {
   return false;
 }
 
+// Module-level OAuth token cache: baseUrl → { authId, refreshId }.
+// Concurrent BitrixClient instances of the same tenant share the freshest
+// token and never run parallel refreshes (parallel refreshes rotate the
+// refresh_token twice, which can break OAuth for the whole tenant).
+const tokenCache = new Map();
+const refreshInFlight = new Map(); // baseUrl → Promise<boolean>
+
+/** Test helper — clears the module-level token cache between tests. */
+export function _resetTokenCacheForTests() {
+  tokenCache.clear();
+  refreshInFlight.clear();
+}
+
 /**
  * HTTP client wrapper for Bitrix24 REST API.
  * Provides internal retry (3 attempts, 2s delay) for transient errors.
@@ -45,14 +58,24 @@ export class BitrixClient {
    * @param {string} tenant.bitrix_url - Bitrix24 base URL
    * @param {string} [tenant.bitrix_webhook_token] - Webhook token (legacy)
    * @param {string} [tenant.auth_id] - OAuth access token
+   * @param {string} [tenant.id] - Tenant UUID (preferred for token persistence)
    * @param {string} [tenant.server_endpoint] - OAuth server endpoint
    */
   constructor(tenant) {
     this.tenant = tenant;
     this.baseUrl = tenant.bitrix_url.replace(/\/$/, '');
     this.token = tenant.bitrix_webhook_token;
-    this.authId = tenant.auth_id;
     this.serverEndpoint = tenant.server_endpoint;
+    // Prefer the module cache: another instance may have refreshed the token
+    // after this tenant snapshot was loaded from the DB.
+    const cached = tenant.auth_id ? tokenCache.get(this.baseUrl) : null;
+    if (cached) {
+      this.authId = cached.authId;
+      this.tenant.auth_id = cached.authId;
+      if (cached.refreshId) this.tenant.refresh_id = cached.refreshId;
+    } else {
+      this.authId = tenant.auth_id;
+    }
     this.maxAttempts = 3;
     this.retryDelay = 2000; // 2 seconds
     this.timeout = 30000; // 30 seconds
@@ -170,11 +193,50 @@ export class BitrixClient {
   }
 
   /**
-   * Refreshes the OAuth token using the refresh_id.
-   * Updates the tenant in the database with the new tokens.
-   * @returns {Promise<boolean>} true if refresh succeeded
+   * Refreshes the OAuth token using the refresh_id — single-flight per tenant.
+   * Concurrent instances wait on the same promise; if another instance already
+   * refreshed, the new token is adopted without hitting the OAuth server again.
+   * @returns {Promise<boolean>} true if a fresh token is available
    */
   async _refreshToken() {
+    const key = this.baseUrl;
+
+    // Another instance already refreshed — adopt the newer token, no API call.
+    const cached = tokenCache.get(key);
+    if (cached && cached.authId !== this.authId) {
+      this.authId = cached.authId;
+      this.tenant.auth_id = cached.authId;
+      if (cached.refreshId) this.tenant.refresh_id = cached.refreshId;
+      return true;
+    }
+
+    // Single-flight: concurrent refreshes for the same tenant share one call.
+    if (refreshInFlight.has(key)) {
+      const ok = await refreshInFlight.get(key);
+      if (ok) {
+        // The winner refreshed while we waited — adopt its token before
+        // returning, otherwise the caller would retry with the stale one.
+        const fresh = tokenCache.get(key);
+        if (fresh && fresh.authId !== this.authId) {
+          this.authId = fresh.authId;
+          this.tenant.auth_id = fresh.authId;
+          if (fresh.refreshId) this.tenant.refresh_id = fresh.refreshId;
+        }
+      }
+      return ok;
+    }
+
+    const promise = this._doRefresh().finally(() => refreshInFlight.delete(key));
+    refreshInFlight.set(key, promise);
+    return promise;
+  }
+
+  /**
+   * Performs the actual OAuth refresh call and persists the new tokens.
+   * Only called through _refreshToken (single-flight).
+   * @returns {Promise<boolean>} true if refresh succeeded
+   */
+  async _doRefresh() {
     const clientId = process.env.BITRIX_CLIENT_ID;
     const clientSecret = process.env.BITRIX_CLIENT_SECRET;
 
@@ -195,18 +257,30 @@ export class BitrixClient {
       }
 
       if (data.access_token) {
-        // Update in-memory
+        const newRefreshId = data.refresh_token || this.tenant.refresh_id;
+
+        // Update in-memory + module cache
         this.authId = data.access_token;
         this.tenant.auth_id = data.access_token;
-        if (data.refresh_token) this.tenant.refresh_id = data.refresh_token;
+        this.tenant.refresh_id = newRefreshId;
+        tokenCache.set(this.baseUrl, { authId: data.access_token, refreshId: newRefreshId });
 
-        // Update in database
+        // Update in database — by tenant id when available (bitrix_url match
+        // can hit the wrong row if the URL was ever reused/renamed)
         try {
           const { db } = await import('../db/client.js');
-          await db.query(
-            'UPDATE tenants SET auth_id = $1, refresh_id = $2, auth_expires_at = NOW() + INTERVAL \'1 hour\' WHERE bitrix_url = $3',
-            [data.access_token, data.refresh_token || this.tenant.refresh_id, this.baseUrl]
-          );
+          const expiresSec = parseInt(data.expires_in, 10) || 3600;
+          if (this.tenant.id) {
+            await db.query(
+              'UPDATE tenants SET auth_id = $1, refresh_id = $2, auth_expires_at = NOW() + ($3 || \' seconds\')::interval WHERE id = $4',
+              [data.access_token, newRefreshId, expiresSec, this.tenant.id]
+            );
+          } else {
+            await db.query(
+              'UPDATE tenants SET auth_id = $1, refresh_id = $2, auth_expires_at = NOW() + ($3 || \' seconds\')::interval WHERE bitrix_url = $4',
+              [data.access_token, newRefreshId, expiresSec, this.baseUrl]
+            );
+          }
           logger.info({ domain: this.baseUrl }, 'OAuth token refreshed successfully');
         } catch (dbErr) {
           logger.error({ error: dbErr.message }, 'Failed to save refreshed token to DB');

@@ -34,10 +34,15 @@ if [ ! -f "$APP_DIR/.env" ]; then
   exit 1
 fi
 
-# Build and start
-echo "Building and starting containers..."
-docker compose down --remove-orphans 2>/dev/null || true
-docker compose up -d --build
+# Build and start — minimal downtime window:
+# 1. build the image while the OLD container is still serving
+# 2. `up -d app` recreates ONLY the app container (postgres/redis keep
+#    running; a full `down` would needlessly restart the database)
+echo "Building image (app still serving)..."
+docker compose build app
+
+echo "Recreating app container..."
+docker compose up -d --remove-orphans app
 
 echo ""
 echo "=== Deploy complete! ==="

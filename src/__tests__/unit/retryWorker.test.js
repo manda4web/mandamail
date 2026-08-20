@@ -14,6 +14,7 @@ vi.mock('../../db/repos/EmailEventRepo.js', () => ({
   EmailEventRepo: {
     findById: vi.fn(),
     setStatus: vi.fn(),
+    findStale: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -25,6 +26,10 @@ vi.mock('../../pipeline/EmailPipeline.js', () => ({
   EmailPipeline: {
     _processInBitrix: vi.fn(),
   },
+}));
+
+vi.mock('../../imap/fetchOriginalEmail.js', () => ({
+  fetchOriginalEmail: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../logger.js', () => ({
@@ -40,6 +45,7 @@ import { RetryJobRepo } from '../../db/repos/RetryJobRepo.js';
 import { EmailEventRepo } from '../../db/repos/EmailEventRepo.js';
 import * as ImapAccountRepo from '../../db/repos/ImapAccountRepo.js';
 import { EmailPipeline } from '../../pipeline/EmailPipeline.js';
+import { fetchOriginalEmail } from '../../imap/fetchOriginalEmail.js';
 
 describe('RetryWorker', () => {
   let worker;
@@ -70,10 +76,13 @@ describe('RetryWorker', () => {
       expect(worker.intervalId).toBeNull();
     });
 
-    it('should run immediately on start', () => {
+    it('should run immediately on start', async () => {
       RetryJobRepo.findPending.mockResolvedValue([]);
+      EmailEventRepo.findStale.mockResolvedValue([]);
       worker.start();
-      expect(RetryJobRepo.findPending).toHaveBeenCalledTimes(1);
+      // _runPending awaits the stale-event recovery before polling, so the
+      // first findPending call happens on a later microtask.
+      await vi.waitFor(() => expect(RetryJobRepo.findPending).toHaveBeenCalledTimes(1));
     });
   });
 
@@ -121,6 +130,38 @@ describe('RetryWorker', () => {
 
       expect(EmailEventRepo.setStatus).toHaveBeenCalledWith('event-1', 'FALHA_DEFINITIVA');
       expect(RetryJobRepo.markFailed).toHaveBeenCalledWith('job-1', 'max 5 attempts reached');
+    });
+
+    it('should defer the job (leave pending) when event is PROCESSANDO (manual reprocess in flight)', async () => {
+      const processing = { ...mockEvent, status: 'PROCESSANDO' };
+      EmailEventRepo.findById.mockResolvedValue(processing);
+
+      await worker._executeJob(mockJob);
+
+      expect(EmailPipeline._processInBitrix).not.toHaveBeenCalled();
+      expect(RetryJobRepo.markFailed).not.toHaveBeenCalled();
+      expect(RetryJobRepo.markSuccess).not.toHaveBeenCalled(); // stays pending
+    });
+
+    it('should close the job without reprocessing when event is already SUCESSO', async () => {
+      const done = { ...mockEvent, status: 'SUCESSO' };
+      EmailEventRepo.findById.mockResolvedValue(done);
+
+      await worker._executeJob(mockJob);
+
+      expect(RetryJobRepo.markSuccess).toHaveBeenCalledWith('job-1');
+      expect(EmailPipeline._processInBitrix).not.toHaveBeenCalled();
+    });
+
+    it('should mark the event PROCESSANDO before executing (blocks concurrent reprocess)', async () => {
+      EmailEventRepo.findById.mockResolvedValue(mockEvent);
+      ImapAccountRepo.findById.mockResolvedValue(mockAccount);
+      EmailPipeline._processInBitrix.mockResolvedValue(undefined);
+      fetchOriginalEmail.mockResolvedValue(null);
+
+      await worker._executeJob(mockJob);
+
+      expect(EmailEventRepo.setStatus).toHaveBeenCalledWith('event-1', 'PROCESSANDO');
     });
 
     it('should mark job failed if imap_account not found', async () => {
@@ -182,6 +223,7 @@ describe('RetryWorker', () => {
       EmailEventRepo.findById.mockResolvedValue(mockEvent);
       ImapAccountRepo.findById.mockResolvedValue(mockAccount);
       EmailPipeline._processInBitrix.mockResolvedValue(undefined);
+      fetchOriginalEmail.mockResolvedValue(null); // IMAP refetch unavailable
 
       await worker._executeJob(mockJob);
 
@@ -191,16 +233,60 @@ describe('RetryWorker', () => {
       expect(emailArg.bodyText).toBe('Hello');
       expect(emailArg.toEmails).toEqual(['to@test.com']);
     });
+
+    it('should use the original email from IMAP (with attachments) when refetch succeeds', async () => {
+      EmailEventRepo.findById.mockResolvedValue(mockEvent);
+      ImapAccountRepo.findById.mockResolvedValue(mockAccount);
+      EmailPipeline._processInBitrix.mockResolvedValue(undefined);
+      fetchOriginalEmail.mockResolvedValue({
+        messageId: mockEvent.message_id,
+        fromEmail: mockEvent.from_email,
+        subject: mockEvent.subject,
+        bodyHtml: '<p>Full body</p>',
+        attachments: [{ fileName: 'contract.pdf', fileData: 'base64...' }],
+      });
+
+      await worker._executeJob(mockJob);
+
+      const emailArg = EmailPipeline._processInBitrix.mock.calls[0][1];
+      expect(fetchOriginalEmail).toHaveBeenCalledWith(mockAccount, mockEvent.message_id);
+      expect(emailArg.attachments).toEqual([{ fileName: 'contract.pdf', fileData: 'base64...' }]);
+      expect(emailArg.bodyHtml).toBe('<p>Full body</p>');
+    });
   });
 
   describe('_runPending', () => {
     it('should do nothing when no pending jobs', async () => {
       RetryJobRepo.findPending.mockResolvedValue([]);
+      EmailEventRepo.findStale.mockResolvedValue([]);
 
       await worker._runPending();
 
       expect(RetryJobRepo.markSuccess).not.toHaveBeenCalled();
       expect(RetryJobRepo.markFailed).not.toHaveBeenCalled();
+    });
+
+    it('should recover stale PROCESSANDO events (crash recovery)', async () => {
+      const staleEvent = { id: 'stale-1', status: 'PROCESSANDO', retry_count: 0 };
+      EmailEventRepo.findStale.mockResolvedValue([staleEvent]);
+      RetryJobRepo.findPending.mockResolvedValue([]);
+      RetryJobRepo.scheduleNext.mockResolvedValue({});
+
+      await worker._runPending();
+
+      expect(EmailEventRepo.setStatus).toHaveBeenCalledWith('stale-1', 'ERRO', { incrementRetry: true });
+      expect(RetryJobRepo.scheduleNext).toHaveBeenCalledWith('stale-1', 1, expect.any(Error));
+    });
+
+    it('should mark stale events as FALHA_DEFINITIVA when retry budget is exhausted', async () => {
+      const staleEvent = { id: 'stale-2', status: 'PROCESSANDO', retry_count: 5 };
+      EmailEventRepo.findStale.mockResolvedValue([staleEvent]);
+      RetryJobRepo.findPending.mockResolvedValue([]);
+
+      await worker._runPending();
+
+      expect(EmailEventRepo.setStatus).toHaveBeenCalledWith('stale-2', 'FALHA_DEFINITIVA');
+      expect(RetryJobRepo.scheduleNext).not.toHaveBeenCalled();
     });
 
     it('should process all pending jobs', async () => {

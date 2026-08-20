@@ -86,11 +86,11 @@ describe('tenantsRoutes', () => {
   });
 
   describe('GET /tenants', () => {
-    it('returns all active tenants', async () => {
+    it('returns all active tenants for an admin user', async () => {
       const tenants = [{ id: '1', name: 'Tenant A' }, { id: '2', name: 'Tenant B' }];
       TenantRepo.findAllActive.mockResolvedValue(tenants);
 
-      const result = await routes['GET /tenants']({}, reply);
+      const result = await routes['GET /tenants']({ user: { id: 'u1', role: 'admin' } }, reply);
       expect(result).toEqual(tenants);
       expect(TenantRepo.findAllActive).toHaveBeenCalled();
     });
