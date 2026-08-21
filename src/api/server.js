@@ -12,6 +12,7 @@ import imapAccountsRoutes from './routes/imapAccounts.js';
 import eventsRoutes from './routes/events.js';
 import subscriptionRoutes from './routes/subscriptions.js';
 import userRoutes from './routes/users.js';
+import routingRulesRoutes from './routes/routingRules.js';
 
 /**
  * Creates and configures the Fastify application instance.
@@ -101,6 +102,7 @@ export function buildApp() {
     protectedApp.register(subscriptionRoutes);
     protectedApp.register(adminRoutes);
     protectedApp.register(userRoutes);
+    protectedApp.register(routingRulesRoutes);
   });
 
   // Global error handler — returns structured JSON errors
