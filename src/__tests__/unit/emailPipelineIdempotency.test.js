@@ -17,6 +17,9 @@ vi.mock('../../db/repos/RetryJobRepo.js', () => ({
 vi.mock('../../db/repos/SubscriptionRepo.js', () => ({
   SubscriptionRepo: { checkAccess: vi.fn().mockResolvedValue({ allowed: true }) },
 }));
+vi.mock('../../db/repos/RoutingRuleRepo.js', () => ({
+  RoutingRuleRepo: { findActiveByTenant: vi.fn().mockResolvedValue([]) },
+}));
 vi.mock('../../pipeline/DedupEngine.js', () => ({ DedupEngine: { isDuplicate: vi.fn() } }));
 vi.mock('../../pipeline/FilterEngine.js', () => ({ FilterEngine: { shouldIgnore: vi.fn() } }));
 vi.mock('../../imap/EmailParser.js', () => ({ parseRaw: vi.fn() }));

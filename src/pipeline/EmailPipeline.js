@@ -11,6 +11,8 @@ import { DealBuilder } from '../bitrix/DealBuilder.js';
 import { ActivityWriter } from '../bitrix/ActivityWriter.js';
 import { uploadAttachments, MAX_ATTACHMENT_SIZE_BYTES } from '../bitrix/AttachmentUploader.js';
 import { BitrixClient } from '../bitrix/BitrixClient.js';
+import { RoutingRuleRepo } from '../db/repos/RoutingRuleRepo.js';
+import { matchRoutingRule } from './RoutingEngine.js';
 import logger from '../logger.js';
 
 export const EmailPipeline = {
@@ -156,6 +158,19 @@ export const EmailPipeline = {
       }
     }
 
+    // Routing rules: the first active rule matching the sender overrides the
+    // account mapping (category/stage/responsible). Runs AFTER the OLX block
+    // so rules match the rewritten customer address, not noreply@olx.com.br.
+    // Fail-open: a DB error here must never lose the lead — proceed with the
+    // account mapping (no rules).
+    let routingRule = null;
+    try {
+      const routingRules = await RoutingRuleRepo.findActiveByTenant(account.tenant_id);
+      routingRule = matchRoutingRule(routingRules, email.fromEmail);
+    } catch (err) {
+      logger.warn(`[Pipeline][${account.email}] routing rules unavailable, proceeding with account mapping: ${err.message}`);
+    }
+
     const tenant = {
       id: account.tenant_id, // lets BitrixClient persist refreshed tokens by tenant id
       bitrix_url: account.bitrix_url,
@@ -169,7 +184,39 @@ export const EmailPipeline = {
       deal_mode: account.deal_mode,
     };
 
+    if (routingRule) {
+      // Loose != null on purpose: bitrix_category_id 0 is a LEGITIMATE override
+      // (force the deal into the default pipeline) and must not be confused
+      // with null (= "no override", keep the account value).
+      if (routingRule.bitrix_category_id != null) {
+        tenant.bitrix_category_id = routingRule.bitrix_category_id;
+        // A rule that changes the funnel without setting a stage leaves the
+        // account stage foreign to the target funnel. crm.deal.* anchors on
+        // CATEGORY_ID and silently ignores a foreign STAGE_ID — we drop it so
+        // the deal (and its audit trail) is born on the target funnel's first
+        // stage instead of claiming a stage it will not get.
+        if (routingRule.bitrix_stage_id == null) tenant.bitrix_stage_id = null;
+      }
+      if (routingRule.bitrix_stage_id != null) tenant.bitrix_stage_id = routingRule.bitrix_stage_id;
+      if (routingRule.bitrix_responsible_id != null) tenant.bitrix_responsible_id = routingRule.bitrix_responsible_id;
+      logger.info(`[Pipeline][${account.email}] routing rule ${routingRule.id} (${routingRule.match_type}:${routingRule.match_value}) applied: category=${tenant.bitrix_category_id} stage=${tenant.bitrix_stage_id} responsible=${tenant.bitrix_responsible_id}`);
+    }
+
     const apiLog = {};
+    if (routingRule) {
+      // Audit trail: which rule shaped this deal. The final upsert persists
+      // the whole apiLog — nothing else needs to change for this to be saved.
+      apiLog.routing_rule = {
+        id: routingRule.id,
+        name: routingRule.name ?? null,
+        match_type: routingRule.match_type,
+        match_value: routingRule.match_value,
+        category_id: routingRule.bitrix_category_id ?? null,
+        stage_id: routingRule.bitrix_stage_id ?? null,
+        responsible_id: routingRule.bitrix_responsible_id ?? null,
+        applied: true,
+      };
+    }
 
     // One shared client for the whole processing — all steps see the same
     // OAuth token and a refresh (single-flight per tenant) applies to all.
@@ -202,6 +249,15 @@ export const EmailPipeline = {
       // Carry the marker into the FINAL upsert — it replaces api_log entirely,
       // so dropping it here would make the NEXT reprocess re-send attachments.
       if (attachmentsDone) apiLog.attachments = prior.api_log.attachments;
+      // Audit truth on a reused deal: the CURRENT rule match shaped nothing —
+      // the deal already exists and is not moved. Keep the record from the run
+      // that created it when we have it; otherwise mark the current match as
+      // not applied so the trail never claims a routing that did not happen.
+      if (prior.api_log && prior.api_log.routing_rule) {
+        apiLog.routing_rule = prior.api_log.routing_rule;
+      } else if (apiLog.routing_rule) {
+        apiLog.routing_rule.applied = false;
+      }
       logger.info(`[Pipeline] reutilizando deal=${dealId} do processamento anterior (id=${event.id})`);
     } else {
       // Contact resolution (Req 8)
