@@ -36,7 +36,7 @@ Fastify 5 (+cors origin:true, helmet com CSP/frameguard **off** p/ iframe Bitrix
 3. **Filtros** — listas globais (mailer-daemon, noreply, bitrix24.com, auto-reply) + `ignore_from` (exato CI) / `ignore_subject` (substring CI) do tenant. Pulados para parser olx.
 4. `sync_start_date` — emails anteriores ao valor efetivo são ignorados.
 5. Valida mapping (category/stage presentes; senão ERRO sem retry).
-6. `_processInBitrix`: `OlxParser.applyOlxLead` (se olx: cliente real vira from, título do anúncio vira subject, preço vira dealValue, telefone +55) → `ContactResolver` (`crm.duplicate.findbycomm` → 1º resultado; senão `crm.contact.add` com nome = from_name || local-part; completa PHONE se faltar) → `DealBuilder` (`crm.deal.add`; TITLE = subject ≤300; campos mapeados subject/body/domain/date/preview/source_id; `deal_mode='merge_by_contact'` reusa deal aberto do contato; OPPORTUNITY BRL p/ OLX; `crm.deal.contact.add` explícito) → `ActivityWriter` (`crm.activity.add` tipo email + `crm.timeline.comment.add` com headers; imagens data:URI/CID sobem via `disk.storage.uploadfile` e viram URLs no corpo) → **anexos**: com `field_mapping.attachment_field` vão como `fileData` num campo UF file do deal (`crm.deal.get`+`update` preservando arquivos existentes); sem o campo → timeline comments (≤20MB cada).
+6. `_processInBitrix`: `OlxParser.applyOlxLead` (se olx: cliente real vira from, título do anúncio vira subject, preço vira dealValue, telefone +55) → **regra de roteamento por remetente** (`RoutingRuleRepo.findActiveByTenant` + `RoutingEngine.matchRoutingRule`, **pós-OLX**, fail-open em erro de DB; primeira regra ativa ordenada por `(priority, created_at)` — match `exact` (email completo CI) ou `domain` (igualdade de domínio, não sufixo) — sobrescreve APENAS os campos preenchidos de category/stage/responsible; regra que troca o funil sem estágio **descarta o estágio da conta** (deal nasce no 1º estágio do funil alvo — `crm.deal.*` ancora no CATEGORY_ID e ignora STAGE_ID estranho); regra aplicada é auditada em `bitrix_results.api_log.routing_rule` (`applied:false`/histórico preservado quando o deal é reusado)) → `ContactResolver` (`crm.duplicate.findbycomm` → 1º resultado; senão `crm.contact.add` com nome = from_name || local-part; completa PHONE se faltar) → `DealBuilder` (`crm.deal.add`; TITLE = subject ≤300; campos mapeados subject/body/domain/date/preview/source_id; `deal_mode='merge_by_contact'` reusa deal aberto do contato; OPPORTUNITY BRL p/ OLX; `crm.deal.contact.add` explícito) → `ActivityWriter` (`crm.activity.add` tipo email + `crm.timeline.comment.add` com headers; imagens data:URI/CID sobem via `disk.storage.uploadfile` e viram URLs no corpo) → **anexos**: com `field_mapping.attachment_field` vão como `fileData` num campo UF file do deal (`crm.deal.get`+`update` preservando arquivos existentes); sem o campo → timeline comments (≤20MB cada).
 7. Sucesso → `SUCESSO` + registro em `bitrix_results`. Falha → `ERRO` + `retry_jobs` (≤5 tentativas, backoff **[2,5,15,30,60] min**) → exaurido → `FALHA_DEFINITIVA`.
 
 **Status de `email_events` (8):** `RECEBIDO, PROCESSANDO, SUCESSO, DUPLICADO, IGNORADO, ERRO, FALHA_DEFINITIVA, PLANO_INATIVO`.
@@ -55,6 +55,13 @@ Fastify 5 (+cors origin:true, helmet com CSP/frameguard **off** p/ iframe Bitrix
 - **Resolução via COALESCE no SQL** (`ImapAccountRepo.findAllActive/findById`) — não existe `resolveMapping.js` (a spec planejava; implementação ficou no SQL). `field_mapping` é **full replacement** (sem merge de chaves) e aceita `attachment_field`.
 - `GET .../mapping` → `{effective, sources: account|tenant}`; `PATCH .../mapping` (campo `null` = volta a herdar) **reinicia o worker**. Conta nova herda mapping atual do tenant.
 
+## Regras de roteamento por remetente (`routing_rules`, migration 020 — IMPLEMENTADA)
+
+- **Tenant-wide** (vale para todas as caixas): regra = `match_type` exact|domain + `match_value` (normalizado lowercase/trim, domain sem `@`) + destinos **individualmente opcionais** `bitrix_category_id`/`bitrix_stage_id`/`bitrix_responsible_id` (≥1 obrigatório; **category `0` = forçar pipeline padrão, `NULL` = herdar — semântica distinta em rota/repo/pipeline**).
+- **Lidas do DB a cada email** (sem snapshot, sem restart de worker) — vale no próximo email após criar/editar, e cobre listener + retry + reprocess. Erro de DB → fail-open.
+- Rotas `GET/POST/PATCH/DELETE /tenants/:id/routing-rules` (`routingRules.js`): 409 por duplicata ativa (com `excludeId` no PATCH; race coberta tratando `23505` do partial unique); SPA página **🧭 Regras** (dropdowns via BX24 SDK; edição faz **PATCH parcial por diff** e injeta option sintética para valor salvo fora da lista — nunca apaga override por falha de carregamento).
+- Mudar regra **não re-routa deals existentes** (idempotência reusa o deal).
+
 ## Billing (`plans`/`coupons`/`subscriptions`, Stripe)
 
 - Trial 14d criado automaticamente na 1ª instalação (`POST /auth/bitrix`); 1 subscription por tenant (UNIQUE).
@@ -67,11 +74,11 @@ Fastify 5 (+cors origin:true, helmet com CSP/frameguard **off** p/ iframe Bitrix
 - `POST /auth/login` — email/senha, emite JWT com `tenant_id` do primeiro tenant do usuário (`user_tenants` ordenado por `granted_at`) + `is_admin`. Usuário sem tenant → `tenant_id: null`.
 - Middleware: `authenticate` (Bearer) → `requireRole('admin')` → `requireTenantAccess` (admin global passa; senão checa `user_tenants`). Rate-limit: 200/min/IP global, `/auth/login` 5/min, `/bitrix/*` e `/auth/bitrix` allowlisted.
 
-## Banco (`src/db/`) — 18 migrations SQL, forward-only
+## Banco (`src/db/`) — 20 migrations SQL, forward-only
 
-Runner: tabela `_migrations`, cada `.sql` numa transação (`src/db/migrate.js` e duplicado inline no `src/index.js`). Tabelas: `tenants` (OAuth: `auth_id/refresh_id/member_id/application_token/server_endpoint`; webhook_token nullable), `imap_accounts` (mapping por conta, `parser_type` standard|olx, cursor UID; senha AES-256-GCM via `ENCRYPTION_KEY` 64-hex), `email_events` (8 status), `bitrix_results` (1:1 com evento, `api_log` JSONB), `retry_jobs`, `alert_configs`, `users`+`user_tenants` (is_admin por tenant, bitrix_user_id), `plans`, `coupons`, `subscriptions`, `processed_stripe_events`.
+Runner: tabela `_migrations`, cada `.sql` numa transação (`src/db/migrate.js`, single-source — lê o diretório; `src/index.js` só chama `runMigrations()`). Tabelas: `tenants` (OAuth: `auth_id/refresh_id/member_id/application_token/server_endpoint`; webhook_token nullable), `imap_accounts` (mapping por conta, `parser_type` standard|olx, cursor UID; senha AES-256-GCM via `ENCRYPTION_KEY` 64-hex), `email_events` (8 status), `bitrix_results` (1:1 com evento, `api_log` JSONB), `retry_jobs`, `alert_configs`, `users`+`user_tenants` (is_admin por tenant, bitrix_user_id), `plans`, `coupons`, `subscriptions`, `processed_stripe_events`, `routing_rules` (roteamento por remetente; partial unique ativo `(tenant_id, match_type, match_value)`).
 
-Repos (`src/db/repos/`, 8): TenantRepo e ImapAccountRepo exportam funções nomeadas; os demais exportam objeto. `ImapAccountRepo` é o maior (COALESCE, encrypt/decrypt, `updateUidState`).
+Repos (`src/db/repos/`, 9): TenantRepo e ImapAccountRepo exportam funções nomeadas; os demais exportam objeto. `ImapAccountRepo` é o maior (COALESCE, encrypt/decrypt, `updateUidState`).
 
 ## Bitrix24 (`src/bitrix/`)
 
@@ -85,7 +92,7 @@ Repos (`src/db/repos/`, 8): TenantRepo e ImapAccountRepo exportam funções nome
 
 ## Testes
 
-`src/__tests__/unit/` — 17 arquivos, 208 casos (crypto, parser, dedup, filter, BitrixClient + token refresh single-flight, contactResolver, activityWriter, attachmentUploader, retryWorker + recovery, auth, rotas, **idempotência do EmailPipeline**). **`properties/`, `integration/`, `helpers/` estão vazios** (.gitkeep) — `npm run test:props` roda vazio; `fast-check` instalado sem uso. Regra do usuário: teste de regressão vai ONDE o bug foi encontrado (ver skill `ai-regression-patterns`).
+`src/__tests__/unit/` — 23 arquivos, 295 casos (crypto, parser, dedup, filter, **RoutingEngine + regras no pipeline**, BitrixClient + token refresh single-flight, contactResolver, activityWriter, attachmentUploader, retryWorker + recovery, auth, rotas, **idempotência do EmailPipeline**). **`properties/`, `integration/`, `helpers/` estão vazios** (.gitkeep) — `npm run test:props` roda vazio; `fast-check` instalado sem uso. Regra do usuário: teste de regressão vai ONDE o bug foi encontrado (ver skill `ai-regression-patterns`).
 
 ## Armadilhas conhecidas (não reintroduzir / considerar em mudanças)
 
