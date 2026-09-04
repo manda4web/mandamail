@@ -134,12 +134,25 @@ export default async function eventsRoutes(fastify) {
     const tenantId = request.params.id;
 
     const { BitrixResultRepo } = await import('../../db/repos/BitrixResultRepo.js');
-    const [stats, dealsCount] = await Promise.all([
+    // Deal counts per window so the dashboard's "Negócios criados" matches the
+    // selected period instead of showing the all-time total (which dwarfed the
+    // period's email count and looked inconsistent). deals_count stays as the
+    // all-time total for backward compatibility.
+    const [stats, dealsAll, dealsToday, dealsWeek, dealsMonth] = await Promise.all([
       EmailEventRepo.getDailyStats(tenantId),
       BitrixResultRepo.countDealsByTenant(tenantId),
+      BitrixResultRepo.countDealsByTenant(tenantId, 1),
+      BitrixResultRepo.countDealsByTenant(tenantId, 7),
+      BitrixResultRepo.countDealsByTenant(tenantId, 30),
     ]);
 
-    return reply.send({ ...stats, deals_count: dealsCount });
+    return reply.send({
+      ...stats,
+      deals_count: dealsAll,
+      deals_today: dealsToday,
+      deals_week: dealsWeek,
+      deals_month: dealsMonth,
+    });
   });
 
   /**

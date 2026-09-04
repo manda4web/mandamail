@@ -85,7 +85,27 @@ export const BitrixResultRepo = {
     return rows[0] || null;
   },
 
-  async countDealsByTenant(tenantId) {
+  /**
+   * Count deals created for a tenant. When `sinceDays` is given, only deals
+   * created within that rolling window are counted — the dashboard uses this
+   * so "Negócios criados" matches the selected period (today/7d/30d) instead
+   * of the all-time total (which made the number dwarf the period's email
+   * count and look inconsistent). Omit `sinceDays` for the all-time total.
+   * @param {string} tenantId
+   * @param {number|null} [sinceDays] - rolling window in days, or null for all-time
+   * @returns {Promise<number>}
+   */
+  async countDealsByTenant(tenantId, sinceDays = null) {
+    if (sinceDays != null) {
+      const { rows } = await db.query(
+        `SELECT COUNT(*) AS count FROM bitrix_results
+          WHERE tenant_id = $1
+            AND bitrix_deal_id IS NOT NULL
+            AND created_at >= NOW() - ($2 || ' days')::INTERVAL`,
+        [tenantId, String(sinceDays)]
+      );
+      return parseInt(rows[0].count, 10);
+    }
     const { rows } = await db.query(
       'SELECT COUNT(*) AS count FROM bitrix_results WHERE tenant_id = $1 AND bitrix_deal_id IS NOT NULL',
       [tenantId]

@@ -54,6 +54,12 @@ export async function runMigrations() {
     const client = await db.getClient();
     try {
       await client.query('BEGIN');
+      // Migrations can include slow DDL (table rewrites, index builds,
+      // backfills) that legitimately exceed the pool's statement_timeout. That
+      // cap protects the running app from runaway queries, but a migration
+      // aborted mid-deploy would roll back and fail the release. Lift the cap
+      // for THIS transaction only (SET LOCAL resets automatically at COMMIT).
+      await client.query('SET LOCAL statement_timeout = 0');
       await client.query(sql);
       await client.query(
         'INSERT INTO _migrations (name) VALUES ($1)',

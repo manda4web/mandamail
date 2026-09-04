@@ -15,15 +15,24 @@ export const TenantScheduler = {
     let skipped = 0;
 
     for (const account of accounts) {
-      // Check if tenant has active subscription before starting worker
-      const access = await SubscriptionRepo.checkAccess(account.tenant_id);
-      if (!access.allowed) {
-        logger.info(`[Scheduler] skipping ${account.email} — plan inactive (${access.reason})`);
+      // Isolate each account: a failure checking one tenant's plan (e.g. a DB
+      // blip) must NOT abort the loop and leave the remaining accounts without
+      // a worker until the supervisor's next tick. The supervisor is the
+      // backstop, but startup should start everything it can right away.
+      try {
+        // Check if tenant has active subscription before starting worker
+        const access = await SubscriptionRepo.checkAccess(account.tenant_id);
+        if (!access.allowed) {
+          logger.info(`[Scheduler] skipping ${account.email} — plan inactive (${access.reason})`);
+          skipped++;
+          continue;
+        }
+        await this.startAccount(account);
+        started++;
+      } catch (err) {
+        logger.error(`[Scheduler] failed to start ${account.email} (continuing with others): ${err.message}`);
         skipped++;
-        continue;
       }
-      await this.startAccount(account);
-      started++;
     }
 
     logger.info(`[Scheduler] started ${started} worker(s), skipped ${skipped} (inactive plan)`);
@@ -119,8 +128,12 @@ export const TenantScheduler = {
     let started = 0;
     for (const account of tenantAccounts) {
       if (!workers.has(account.id)) {
-        await this.startAccount(account);
-        started++;
+        try {
+          await this.startAccount(account);
+          started++;
+        } catch (err) {
+          logger.error(`[Scheduler] failed to start ${account.email} for tenant ${tenantId} (continuing): ${err.message}`);
+        }
       }
     }
     logger.info(`[Scheduler] started ${started} worker(s) for tenant ${tenantId} (subscription activated)`);
@@ -148,6 +161,24 @@ export const TenantScheduler = {
   },
 
   /**
+   * In-memory state of a single account's worker, or null when no worker
+   * exists (never started, stopped, or plan inactive). Used by the per-account
+   * health endpoint to distinguish "worker running & healthy" from "worker
+   * present but stalled" from "no worker at all".
+   * @param {string} accountId
+   * @returns {{ running: boolean, stalled: boolean, msSinceActivity: number|null }|null}
+   */
+  getWorkerState(accountId) {
+    const w = workers.get(accountId);
+    if (!w) return null;
+    return {
+      running: !!w.running,
+      stalled: typeof w.isStalled === 'function' ? w.isStalled() : false,
+      msSinceActivity: typeof w.msSinceActivity === 'function' ? w.msSinceActivity() : null,
+    };
+  },
+
+  /**
    * Periodic supervisor: ensures every active account (with a valid plan) has a
    * running worker. Restarts any worker that died or was never started.
    * This keeps email processing running 24/7 without depending on the UI.
@@ -171,22 +202,33 @@ export const TenantScheduler = {
 
         for (const account of accounts) {
           const existing = workers.get(account.id);
-          const alive = existing && existing.running;
+
+          // A worker counts as healthy only if it is running AND actually
+          // making progress. The old check trusted `running` alone, so a
+          // worker that was "alive but stuck" (hung socket, frozen idle loop)
+          // stayed invisible to the supervisor and the account silently
+          // stopped receiving email until someone reconnected it by hand.
+          const stalled = existing && typeof existing.isStalled === 'function' && existing.isStalled();
+          const alive = existing && existing.running && !stalled;
           if (alive) continue;
 
-          // Worker missing or not running — check plan then (re)start
+          // Worker missing, not running, or stalled — check plan then (re)start
           const access = await SubscriptionRepo.checkAccess(account.tenant_id);
           if (!access.allowed) {
             // Plan inactive — make sure any lingering worker is stopped
             if (existing) await this.stopAccount(account.id);
             continue;
           }
-          // Remove dead worker reference and restart
+          // Remove dead/stalled worker reference and restart
           if (existing) {
+            if (stalled) {
+              const idleSec = Math.round(existing.msSinceActivity() / 1000);
+              logger.warn(`[Scheduler][Supervisor] worker ${account.email} stalled (no activity for ${idleSec}s) — forcing restart`);
+            }
             try { await existing.stop(); } catch {}
             workers.delete(account.id);
           }
-          logger.warn(`[Scheduler][Supervisor] restarting dead worker: ${account.email}`);
+          logger.warn(`[Scheduler][Supervisor] restarting ${stalled ? 'stalled' : 'dead'} worker: ${account.email}`);
           await this.startAccount(account);
         }
       } catch (err) {

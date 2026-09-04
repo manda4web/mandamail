@@ -233,7 +233,15 @@ describe('Events Routes', () => {
 
       expect(response.statusCode).toBe(200);
       const payload = JSON.parse(response.payload);
-      expect(payload).toEqual({ ...mockStats, deals_count: 0 });
+      // Dashboard now returns per-window deal counts alongside the all-time
+      // total (all 0 here since countDealsByTenant is mocked to 0).
+      expect(payload).toEqual({
+        ...mockStats,
+        deals_count: 0,
+        deals_today: 0,
+        deals_week: 0,
+        deals_month: 0,
+      });
       expect(EmailEventRepo.getDailyStats).toHaveBeenCalledWith('tenant-456');
     });
   });

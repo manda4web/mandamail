@@ -6,3 +6,4 @@ coverage
 chave/
 *.pem
 .serena/
+semantic-review/
