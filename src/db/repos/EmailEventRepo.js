@@ -161,12 +161,40 @@ export const EmailEventRepo = {
   },
 
   async getDailyStats(tenantId) {
+    // The dashboard shows a success RATE per selected period (today / 7d /
+    // 30d). The rate must divide successes and totals from the SAME window —
+    // mixing (e.g. success_today / week_total) produces a meaningless number.
+    // So we expose matching total_/success_ pairs for each window. The success
+    // rate intentionally counts only "actionable" outcomes (SUCESSO vs
+    // ERRO/FALHA_DEFINITIVA); DUPLICADO/IGNORADO/PLANO_INATIVO are neither a
+    // success nor a failure and must not drag the rate down.
+    //
+    // Windows use rolling intervals from now (last 7 / 30 days), which is what
+    // the "7 dias"/"30 dias" selector means to a user, rather than calendar
+    // week/month boundaries.
     const { rows } = await db.query(
       `SELECT
+        -- Totals per window (all ingested events)
         COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS today,
-        COUNT(*) FILTER (WHERE created_at >= date_trunc('week', CURRENT_DATE)) AS week,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS week,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') AS month,
+
+        -- "Actionable" totals per window = SUCESSO + ERRO + FALHA_DEFINITIVA
+        -- (the denominator for the success rate).
+        COUNT(*) FILTER (WHERE status IN ('SUCESSO','ERRO','FALHA_DEFINITIVA') AND created_at >= CURRENT_DATE) AS actionable_today,
+        COUNT(*) FILTER (WHERE status IN ('SUCESSO','ERRO','FALHA_DEFINITIVA') AND created_at >= NOW() - INTERVAL '7 days') AS actionable_week,
+        COUNT(*) FILTER (WHERE status IN ('SUCESSO','ERRO','FALHA_DEFINITIVA') AND created_at >= NOW() - INTERVAL '30 days') AS actionable_month,
+
+        -- Successes per window (the numerator).
         COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= CURRENT_DATE) AS success_today,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= NOW() - INTERVAL '7 days') AS success_week,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= NOW() - INTERVAL '30 days') AS success_month,
+
+        -- Errors per window.
         COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA') AND created_at >= CURRENT_DATE) AS errors,
+        COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA') AND created_at >= NOW() - INTERVAL '7 days') AS errors_week,
+        COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA') AND created_at >= NOW() - INTERVAL '30 days') AS errors_month,
+
         COUNT(*) FILTER (WHERE status IN ('RECEBIDO','PROCESSANDO') AND created_at >= CURRENT_DATE) AS pending,
         COUNT(*) FILTER (WHERE status = 'RECEBIDO') AS recebido,
         COUNT(*) FILTER (WHERE status = 'PROCESSANDO') AS processando,
