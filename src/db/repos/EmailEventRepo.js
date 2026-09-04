@@ -195,6 +195,46 @@ export const EmailEventRepo = {
         COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA') AND created_at >= NOW() - INTERVAL '7 days') AS errors_week,
         COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA') AND created_at >= NOW() - INTERVAL '30 days') AS errors_month,
 
+        -- Duplicates/ignored per window (quick-stats should match the period).
+        COUNT(*) FILTER (WHERE status = 'DUPLICADO' AND created_at >= CURRENT_DATE) AS dup_today,
+        COUNT(*) FILTER (WHERE status = 'DUPLICADO' AND created_at >= NOW() - INTERVAL '7 days') AS dup_week,
+        COUNT(*) FILTER (WHERE status = 'DUPLICADO' AND created_at >= NOW() - INTERVAL '30 days') AS dup_month,
+        COUNT(*) FILTER (WHERE status = 'IGNORADO' AND created_at >= CURRENT_DATE) AS ign_today,
+        COUNT(*) FILTER (WHERE status = 'IGNORADO' AND created_at >= NOW() - INTERVAL '7 days') AS ign_week,
+        COUNT(*) FILTER (WHERE status = 'IGNORADO' AND created_at >= NOW() - INTERVAL '30 days') AS ign_month,
+
+        -- PREVIOUS window (immediately before the current one) for real trend
+        -- arrows. today→yesterday, 7d→the 7 days before that, 30d→prior 30.
+        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '1 day' AND created_at < CURRENT_DATE) AS prev_today,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS prev_week,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '60 days' AND created_at < NOW() - INTERVAL '30 days') AS prev_month,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= CURRENT_DATE - INTERVAL '1 day' AND created_at < CURRENT_DATE) AS prev_success_today,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS prev_success_week,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= NOW() - INTERVAL '60 days' AND created_at < NOW() - INTERVAL '30 days') AS prev_success_month,
+
+        -- Deals (SUCESSO) in the previous window, for the deals trend arrow.
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= CURRENT_DATE - INTERVAL '1 day' AND created_at < CURRENT_DATE) AS prev_deals_today,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS prev_deals_week,
+        COUNT(*) FILTER (WHERE status = 'SUCESSO' AND created_at >= NOW() - INTERVAL '60 days' AND created_at < NOW() - INTERVAL '30 days') AS prev_deals_month,
+
+        -- Real average processing time (seconds) per window: only SUCESSO
+        -- events with a processed_at, capped at 24h to exclude backlog outliers.
+        ROUND(AVG(EXTRACT(EPOCH FROM (processed_at - created_at))) FILTER (
+          WHERE status = 'SUCESSO' AND processed_at IS NOT NULL
+            AND processed_at >= created_at
+            AND processed_at - created_at < INTERVAL '24 hours'
+            AND created_at >= CURRENT_DATE))::int AS avg_seconds_today,
+        ROUND(AVG(EXTRACT(EPOCH FROM (processed_at - created_at))) FILTER (
+          WHERE status = 'SUCESSO' AND processed_at IS NOT NULL
+            AND processed_at >= created_at
+            AND processed_at - created_at < INTERVAL '24 hours'
+            AND created_at >= NOW() - INTERVAL '7 days'))::int AS avg_seconds_week,
+        ROUND(AVG(EXTRACT(EPOCH FROM (processed_at - created_at))) FILTER (
+          WHERE status = 'SUCESSO' AND processed_at IS NOT NULL
+            AND processed_at >= created_at
+            AND processed_at - created_at < INTERVAL '24 hours'
+            AND created_at >= NOW() - INTERVAL '30 days'))::int AS avg_seconds_month,
+
         COUNT(*) FILTER (WHERE status IN ('RECEBIDO','PROCESSANDO') AND created_at >= CURRENT_DATE) AS pending,
         COUNT(*) FILTER (WHERE status = 'RECEBIDO') AS recebido,
         COUNT(*) FILTER (WHERE status = 'PROCESSANDO') AS processando,
@@ -209,6 +249,29 @@ export const EmailEventRepo = {
       [tenantId]
     );
     return rows[0];
+  },
+
+  /**
+   * Email counts grouped by IMAP account for a tenant within a rolling window.
+   * Feeds the dashboard "Por Conta" panel (which previously showed 0 because
+   * the accounts list endpoint carries no volume data). Returns SUCESSO count
+   * separately so the panel can show volume + how many became deals.
+   * @param {string} tenantId
+   * @param {number} sinceDays - rolling window in days
+   * @returns {Promise<Array<{imap_account_id:string,total:number,success:number}>>}
+   */
+  async countByAccount(tenantId, sinceDays = 7) {
+    const { rows } = await db.query(
+      `SELECT imap_account_id,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE status = 'SUCESSO')::int AS success
+         FROM email_events
+        WHERE tenant_id = $1
+          AND created_at >= NOW() - ($2 || ' days')::INTERVAL
+        GROUP BY imap_account_id`,
+      [tenantId, String(sinceDays)]
+    );
+    return rows;
   },
 
   async list({ tenantId, accountId, status, fromEmail, subject, startDate, endDate, page = 1, limit = 20 }) {

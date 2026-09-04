@@ -133,17 +133,23 @@ export default async function eventsRoutes(fastify) {
   }, async (request, reply) => {
     const tenantId = request.params.id;
 
+    // Selected period drives the per-account breakdown window. Accepts
+    // today/7d/30d (matches the dashboard selector); defaults to 7 days.
+    const periodParam = request.query.period;
+    const periodDays = periodParam === 'today' ? 1 : periodParam === '30d' ? 30 : 7;
+
     const { BitrixResultRepo } = await import('../../db/repos/BitrixResultRepo.js');
     // Deal counts per window so the dashboard's "Negócios criados" matches the
     // selected period instead of showing the all-time total (which dwarfed the
     // period's email count and looked inconsistent). deals_count stays as the
     // all-time total for backward compatibility.
-    const [stats, dealsAll, dealsToday, dealsWeek, dealsMonth] = await Promise.all([
+    const [stats, dealsAll, dealsToday, dealsWeek, dealsMonth, byAccount] = await Promise.all([
       EmailEventRepo.getDailyStats(tenantId),
       BitrixResultRepo.countDealsByTenant(tenantId),
       BitrixResultRepo.countDealsByTenant(tenantId, 1),
       BitrixResultRepo.countDealsByTenant(tenantId, 7),
       BitrixResultRepo.countDealsByTenant(tenantId, 30),
+      EmailEventRepo.countByAccount(tenantId, periodDays),
     ]);
 
     return reply.send({
@@ -152,6 +158,7 @@ export default async function eventsRoutes(fastify) {
       deals_today: dealsToday,
       deals_week: dealsWeek,
       deals_month: dealsMonth,
+      by_account: byAccount,
     });
   });
 

@@ -6,6 +6,7 @@ vi.mock('../../db/repos/EmailEventRepo.js', () => ({
   EmailEventRepo: {
     list: vi.fn(),
     getDailyStats: vi.fn(),
+    countByAccount: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -233,14 +234,16 @@ describe('Events Routes', () => {
 
       expect(response.statusCode).toBe(200);
       const payload = JSON.parse(response.payload);
-      // Dashboard now returns per-window deal counts alongside the all-time
-      // total (all 0 here since countDealsByTenant is mocked to 0).
+      // Dashboard now returns per-window deal counts + per-account breakdown
+      // alongside the all-time total (all 0/empty here since the repos are
+      // mocked to 0/[]).
       expect(payload).toEqual({
         ...mockStats,
         deals_count: 0,
         deals_today: 0,
         deals_week: 0,
         deals_month: 0,
+        by_account: [],
       });
       expect(EmailEventRepo.getDailyStats).toHaveBeenCalledWith('tenant-456');
     });
