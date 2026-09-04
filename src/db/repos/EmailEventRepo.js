@@ -274,6 +274,47 @@ export const EmailEventRepo = {
     return rows;
   },
 
+  /**
+   * Real per-day counts for the volume chart. Computed in the DB with a
+   * generated date series so EVERY day in the window has a row (even zero
+   * days), rather than deriving from the recent-events list (which only
+   * covered the last ~100 events and collapsed all volume onto one day).
+   * Buckets by Brasília day (UTC-3) to match how the UI groups dates.
+   * @param {string} tenantId
+   * @param {number} days - number of days back (inclusive of today)
+   * @returns {Promise<Array<{day:string,success:number,error:number,ignored:number}>>}
+   */
+  async getDailyTimeseries(tenantId, days = 7) {
+    const { rows } = await db.query(
+      `WITH span AS (
+         SELECT generate_series(
+           (CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')::date - ($2::int - 1),
+           (CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')::date,
+           INTERVAL '1 day'
+         )::date AS day
+       ),
+       ev AS (
+         SELECT (created_at AT TIME ZONE 'America/Sao_Paulo')::date AS day,
+                COUNT(*) FILTER (WHERE status = 'SUCESSO')::int AS success,
+                COUNT(*) FILTER (WHERE status IN ('ERRO','FALHA_DEFINITIVA'))::int AS error,
+                COUNT(*) FILTER (WHERE status IN ('IGNORADO','DUPLICADO'))::int AS ignored
+           FROM email_events
+          WHERE tenant_id = $1
+            AND created_at >= (CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')::date - ($2::int - 1)
+          GROUP BY 1
+       )
+       SELECT to_char(span.day, 'YYYY-MM-DD') AS day,
+              COALESCE(ev.success, 0) AS success,
+              COALESCE(ev.error, 0)   AS error,
+              COALESCE(ev.ignored, 0) AS ignored
+         FROM span
+         LEFT JOIN ev ON ev.day = span.day
+        ORDER BY span.day ASC`,
+      [tenantId, days]
+    );
+    return rows;
+  },
+
   async list({ tenantId, accountId, status, fromEmail, subject, startDate, endDate, page = 1, limit = 20 }) {
     const conditions = ['e.tenant_id = $1'];
     const params = [tenantId];

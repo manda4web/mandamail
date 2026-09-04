@@ -7,6 +7,7 @@ vi.mock('../../db/repos/EmailEventRepo.js', () => ({
     list: vi.fn(),
     getDailyStats: vi.fn(),
     countByAccount: vi.fn().mockResolvedValue([]),
+    getDailyTimeseries: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -244,6 +245,7 @@ describe('Events Routes', () => {
         deals_week: 0,
         deals_month: 0,
         by_account: [],
+        timeseries: [],
       });
       expect(EmailEventRepo.getDailyStats).toHaveBeenCalledWith('tenant-456');
     });

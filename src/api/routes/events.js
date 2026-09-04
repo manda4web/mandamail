@@ -143,13 +143,18 @@ export default async function eventsRoutes(fastify) {
     // selected period instead of showing the all-time total (which dwarfed the
     // period's email count and looked inconsistent). deals_count stays as the
     // all-time total for backward compatibility.
-    const [stats, dealsAll, dealsToday, dealsWeek, dealsMonth, byAccount] = await Promise.all([
+    // Volume chart shows one bar per day; "today" still shows a small 7-day
+    // context so the chart isn't a single lonely bar.
+    const seriesDays = periodParam === '30d' ? 30 : 7;
+
+    const [stats, dealsAll, dealsToday, dealsWeek, dealsMonth, byAccount, timeseries] = await Promise.all([
       EmailEventRepo.getDailyStats(tenantId),
       BitrixResultRepo.countDealsByTenant(tenantId),
       BitrixResultRepo.countDealsByTenant(tenantId, 1),
       BitrixResultRepo.countDealsByTenant(tenantId, 7),
       BitrixResultRepo.countDealsByTenant(tenantId, 30),
       EmailEventRepo.countByAccount(tenantId, periodDays),
+      EmailEventRepo.getDailyTimeseries(tenantId, seriesDays),
     ]);
 
     return reply.send({
@@ -159,6 +164,7 @@ export default async function eventsRoutes(fastify) {
       deals_week: dealsWeek,
       deals_month: dealsMonth,
       by_account: byAccount,
+      timeseries,
     });
   });
 
