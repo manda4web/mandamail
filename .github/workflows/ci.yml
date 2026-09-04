@@ -1,0 +1,44 @@
+name: CI
+
+# Runs the test suite and a security audit on every push and pull request
+# targeting main. Keeps regressions and known-vulnerable dependencies out of
+# the branch that gets deployed to Lightsail.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # Reproducible install from the lockfile — fails if package-lock.json is
+      # out of sync with package.json, catching accidental drift.
+      - name: Install dependencies
+        run: npm ci
+
+      # The full unit/integration/property suite. `npm test` = `vitest run`
+      # (single pass, no watch), which is the correct mode for CI.
+      - name: Run tests
+        run: npm test
+
+      # Fail the build on high/critical CVEs in production dependencies. Dev-only
+      # advisories don't block a deploy, so the gate is scoped to prod deps.
+      - name: Security audit (production deps)
+        run: npm audit --omit=dev --audit-level=high

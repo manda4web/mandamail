@@ -114,19 +114,13 @@ export const EmailPipeline = {
         }
       }
 
-      // STEP 4: Validate required mapping fields before Bitrix integration
-      if (!account.bitrix_category_id && account.bitrix_category_id !== 0) {
-        logger.error(`[Pipeline] Missing required mapping (bitrix_category_id) for account=${account.id}`);
-        await EmailEventRepo.setStatus(event.id, 'ERRO');
-        return;
-      }
-      if (!account.bitrix_stage_id) {
-        logger.error(`[Pipeline] Missing required mapping (bitrix_stage_id) for account=${account.id}`);
-        await EmailEventRepo.setStatus(event.id, 'ERRO');
-        return;
-      }
-
-      // STEP 5: Bitrix integration (Req 7.3)
+      // STEP 4: Bitrix integration (Req 7.3). The required-mapping validation
+      // lives INSIDE _processInBitrix (after routing rules are applied), so it
+      // is enforced identically on the first run, on retries (RetryWorker) and
+      // on manual reprocess — all of which re-enter through _processInBitrix.
+      // A missing mapping throws there and is handled by the catch below
+      // (scheduled retry / FALHA_DEFINITIVA), instead of ever creating a deal
+      // in the wrong funnel.
       await EmailEventRepo.setStatus(event.id, 'PROCESSANDO');
       await this._processInBitrix(account, email, event);
     } catch (err) {
@@ -216,6 +210,21 @@ export const EmailPipeline = {
         responsible_id: routingRule.bitrix_responsible_id ?? null,
         applied: true,
       };
+    }
+
+    // Required-mapping guard — validates the EFFECTIVE mapping AFTER routing
+    // rules were applied (a rule may supply the category the account lacks).
+    // Only bitrix_category_id is truly required: a null stage is a LEGITIMATE
+    // state (a rule that changes the funnel without a stage lets Bitrix place
+    // the deal on the target funnel's first stage). Throwing here (instead of
+    // building a fallback deal in category 0) is deliberate: every entry point
+    // (initial process(), retry, manual reprocess) re-enters through
+    // _processInBitrix, so a still-missing category re-schedules via the
+    // caller's catch until the admin fixes the config — the lead then
+    // self-heals into the CORRECT funnel, and no wrong-funnel deal is ever
+    // created (which would also block a later correct reprocess via dedup).
+    if (tenant.bitrix_category_id == null) {
+      throw new Error(`missing required mapping (bitrix_category_id) for account=${account.id} — deal not created, will retry until configured`);
     }
 
     // One shared client for the whole processing — all steps see the same

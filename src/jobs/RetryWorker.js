@@ -14,8 +14,14 @@ export class RetryWorker {
 
   start() {
     this.running = true;
-    this.intervalId = setInterval(() => this._runPending(), 30_000);
-    this._runPending(); // run immediately
+    // Defense-in-depth: even though _runPending guards its body with try/catch,
+    // attach a .catch so a future refactor that lets something throw before the
+    // internal try can never become a process-killing unhandled rejection.
+    this.intervalId = setInterval(
+      () => this._runPending().catch(err => logger.error(`[RetryWorker] tick error: ${err.message}`)),
+      30_000
+    );
+    this._runPending().catch(err => logger.error(`[RetryWorker] initial run error: ${err.message}`));
     logger.info('[RetryWorker] started — checking every 30s');
   }
 

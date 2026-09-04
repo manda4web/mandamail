@@ -15,10 +15,54 @@ export class ImapListener {
     this.connectionLost = false;
     this.uidFailCounts = new Map(); // uid -> consecutive failure count
     this.maxUidFails = 3;
+
+    // --- Liveness / watchdog ---
+    // lastActivityAt is bumped on every successful IMAP interaction (connect,
+    // heartbeat, poll cycle, message processed). The internal watchdog and the
+    // TenantScheduler supervisor use it to detect a worker that is "alive but
+    // stuck" (running === true, socket looks usable, but no progress is being
+    // made). That silent-stall state is exactly what forced clients to open
+    // the app and reconnect the account manually.
+    this.lastActivityAt = Date.now();
+    // If nothing succeeds for this long, the connection is considered dead even
+    // if imapflow never emitted 'close'/'error' (half-open socket). Must be a
+    // bit larger than the idle heartbeat (30s) and the socketTimeout margin.
+    this.stallTimeoutMs = 4 * 60 * 1000; // 4 minutes
+    // How often the internal watchdog probes the connection with a NOOP.
+    this.watchdogIntervalMs = 60 * 1000; // 1 minute
+    this._watchdogTimer = null;
+  }
+
+  /**
+   * Records that the worker made real progress. Used by the watchdog and the
+   * scheduler supervisor to distinguish a healthy worker from a stalled one.
+   */
+  _touch() {
+    this.lastActivityAt = Date.now();
+  }
+
+  /**
+   * Milliseconds since the last successful IMAP activity. The supervisor uses
+   * this to force-restart a worker that is running but no longer progressing.
+   * @returns {number}
+   */
+  msSinceActivity() {
+    return Date.now() - this.lastActivityAt;
+  }
+
+  /**
+   * True when the worker is running but hasn't made progress within the stall
+   * timeout. A stalled worker must be torn down and recreated.
+   * @returns {boolean}
+   */
+  isStalled() {
+    return this.running && this.msSinceActivity() > this.stallTimeoutMs;
   }
 
   async start() {
     this.running = true;
+    this._touch();
+    this._startWatchdog();
     // Single non-recursive supervisor loop. Each iteration establishes a fresh
     // connection and runs the poll/idle loop until the connection is lost, then
     // backs off and reconnects. This guarantees the worker recovers 24/7 from
@@ -39,14 +83,65 @@ export class ImapListener {
       if (!this.running) break;
       await this._backoff();
     }
+    this._stopWatchdog();
   }
 
   async stop() {
     this.running = false;
+    this._stopWatchdog();
     try { await this.client?.logout(); } catch {}
     try { await this.client?.close?.(); } catch {}
     this.client = null;
     logger.info(`[IMAP][${this.account.email}] worker stopped`);
+  }
+
+  /**
+   * Internal watchdog: independent of imapflow's own 'close'/'error' events.
+   * A half-open TCP socket (very common with Gmail/corporate NAT/firewalls)
+   * can leave the connection "usable" from the client's point of view while no
+   * data ever flows again. The IDLE loop would then sit forever and the account
+   * would stop receiving email until a manual reconnect. This timer probes the
+   * live connection with a lightweight NOOP and, if it fails or the worker has
+   * made no progress within stallTimeoutMs, flips connectionLost so the
+   * supervisor loop in start() reconnects with a fresh socket.
+   */
+  _startWatchdog() {
+    if (this._watchdogTimer) return;
+    this._watchdogTimer = setInterval(async () => {
+      if (!this.running) return;
+
+      // No progress for too long — force a reconnect even if the socket claims
+      // to be usable. This is the core fix for "alive but stuck" workers.
+      if (this.msSinceActivity() > this.stallTimeoutMs) {
+        logger.warn(`[IMAP][${this.account.email}] watchdog: no activity for ${Math.round(this.msSinceActivity()/1000)}s — forcing reconnect`);
+        this.connectionLost = true;
+        try { await this.client?.close?.(); } catch {}
+        return;
+      }
+
+      // Actively probe the connection. A hung NOOP surfaces a dead socket long
+      // before the 5-min socketTimeout would.
+      if (this.client?.usable) {
+        try {
+          await Promise.race([
+            this.client.noop(),
+            this._sleep(15000).then(() => { throw new Error('NOOP timeout'); }),
+          ]);
+          this._touch(); // successful round-trip = healthy connection
+        } catch (err) {
+          logger.warn(`[IMAP][${this.account.email}] watchdog: health probe failed (${err.message}) — forcing reconnect`);
+          this.connectionLost = true;
+          try { await this.client?.close?.(); } catch {}
+        }
+      }
+    }, this.watchdogIntervalMs);
+  }
+
+  _stopWatchdog() {
+    if (this._watchdogTimer) {
+      clearInterval(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
   }
 
   async _connectAndRun() {
@@ -87,6 +182,7 @@ export class ImapListener {
     }
 
     this.retryCount = 0; // reset on successful connection
+    this._touch();
     await ImapAccountRepo.updateLastPoll(this.account.id, null);
     logger.info(`[IMAP][${this.account.email}] connected — mode: ${this.account.poll_mode}`);
 
@@ -139,6 +235,7 @@ export class ImapListener {
     while (this._alive()) {
       await this._sleep(30_000);
       if (!this._alive()) break;
+      this._touch();
       await ImapAccountRepo.updateLastPoll(this.account.id, null);
     }
   }
@@ -147,6 +244,7 @@ export class ImapListener {
     while (this._alive()) {
       await this._fetchNew();
       if (!this._alive()) break;
+      this._touch();
       await ImapAccountRepo.updateLastPoll(this.account.id, null);
       await this._sleep(this.account.poll_interval_sec * 1000);
     }
@@ -276,6 +374,7 @@ export class ImapListener {
             // email, so a transient failure doesn't skip a lead.
             await this._saveCursor(uidValidity, msg.uid);
             cursor = msg.uid;
+            this._touch(); // real progress — keeps the watchdog happy
           } catch (err) {
             // process() throws only on catastrophic failure (e.g. DB down or a
             // malformed email Postgres rejects). Retry a few times; if it keeps
@@ -284,11 +383,23 @@ export class ImapListener {
             const fails = (this.uidFailCounts.get(msg.uid) || 0) + 1;
             this.uidFailCounts.set(msg.uid, fails);
             if (fails >= this.maxUidFails) {
-              logger.error(`[IMAP][${this.account.email}] uid=${msg.uid} failed ${fails}x (poison, skipping): ${err.message}`);
+              // Head-of-line protection: a single UID that keeps failing must
+              // NOT freeze the cursor forever, otherwise every newer lead in
+              // the mailbox stops arriving (a common cause of "email stopped,
+              // had to reconnect"). Skip it, record the error for visibility,
+              // and let the retry/pipeline layer handle recovery of this event.
+              logger.error(`[IMAP][${this.account.email}] uid=${msg.uid} failed ${fails}x (poison, skipping to unblock newer leads): ${err.message}`);
               this.uidFailCounts.delete(msg.uid);
+              try {
+                await ImapAccountRepo.updateLastPoll(
+                  this.account.id,
+                  `Mensagem uid=${msg.uid} ignorada após ${fails} falhas: ${String(err.message).substring(0, 140)}`
+                );
+              } catch { /* observability only */ }
               await this._markSeen(msg.uid);
               await this._saveCursor(uidValidity, msg.uid);
               cursor = msg.uid;
+              this._touch();
               continue;
             }
             logger.error(`[IMAP][${this.account.email}] error processing uid=${msg.uid} (attempt ${fails}, will retry): ${err.message}`);

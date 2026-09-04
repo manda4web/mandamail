@@ -13,17 +13,29 @@ export class CleanupWorker {
   constructor(intervalHours = 24) {
     this.intervalMs = intervalHours * 60 * 60 * 1000;
     this.timer = null;
+    this.initialTimer = null;
   }
 
   start() {
-    // Run once on startup (after 5 minutes to let things settle)
-    setTimeout(() => this._run(), 5 * 60 * 1000);
+    // Run once on startup (after 5 minutes to let things settle). .catch so a
+    // rejection never escapes as a process-wide unhandled rejection.
+    this.initialTimer = setTimeout(
+      () => this._run().catch(err => logger.error(`[CleanupWorker] initial run error: ${err.message}`)),
+      5 * 60 * 1000
+    );
     // Then run every intervalMs
-    this.timer = setInterval(() => this._run(), this.intervalMs);
+    this.timer = setInterval(
+      () => this._run().catch(err => logger.error(`[CleanupWorker] run error: ${err.message}`)),
+      this.intervalMs
+    );
     logger.info(`[CleanupWorker] started — runs every ${this.intervalMs / 3600000}h`);
   }
 
   stop() {
+    if (this.initialTimer) {
+      clearTimeout(this.initialTimer);
+      this.initialTimer = null;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

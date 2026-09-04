@@ -1,18 +1,31 @@
 import { db } from '../db/client.js';
 import { EmailEventRepo } from '../db/repos/EmailEventRepo.js';
 import { AlertConfigRepo } from '../db/repos/AlertConfigRepo.js';
+import * as ImapAccountRepo from '../db/repos/ImapAccountRepo.js';
 import logger from '../logger.js';
+
+// An account whose worker hasn't updated last_poll_at for this long is
+// considered silent. In idle mode the heartbeat runs every 30s and in poll
+// mode every poll_interval_sec (<=3600s), so 15 min is comfortably beyond any
+// healthy cycle plus reconnection backoff, avoiding false positives.
+const SILENT_ACCOUNT_MINUTES = Number(process.env.SILENT_ACCOUNT_MINUTES ?? 15);
 
 export class AlertService {
   constructor(checkIntervalSec = 60) {
     this.checkIntervalSec = checkIntervalSec;
     this.intervalId = null;
     this.lastAlertTimes = new Map(); // eventId:status -> timestamp
+    this.lastSilentAlertTimes = new Map(); // accountId -> timestamp
   }
 
   start() {
-    this.intervalId = setInterval(() => this.checkAll(), this.checkIntervalSec * 1000);
-    this.checkAll(); // run immediately
+    // .catch on the interval promise so an async rejection can never escape as
+    // a process-wide unhandled rejection.
+    this.intervalId = setInterval(
+      () => this.checkAll().catch(err => logger.error(`[AlertService] tick error: ${err.message}`)),
+      this.checkIntervalSec * 1000
+    );
+    this.checkAll().catch(err => logger.error(`[AlertService] initial run error: ${err.message}`));
     logger.info(`[AlertService] started — checking every ${this.checkIntervalSec}s`);
   }
 
@@ -32,6 +45,139 @@ export class AlertService {
       }
     } catch (err) {
       logger.error(`[AlertService] error: ${err.message}`);
+    }
+
+    // Silent-account detection runs independently of stuck-event detection:
+    // a dead worker produces NO email_events, so findStuck would never see it.
+    // This is the "an account stopped and nobody noticed" detector.
+    try {
+      await this._checkSilentAccounts();
+    } catch (err) {
+      logger.error(`[AlertService] silent-account check error: ${err.message}`);
+    }
+  }
+
+  /**
+   * Alerts when an active account's worker has gone silent (last_poll_at stale).
+   * Uses the tenant's existing alert_configs for delivery, deduped per account
+   * within the silence window so it doesn't spam every cycle.
+   */
+  async _checkSilentAccounts() {
+    const silent = await ImapAccountRepo.findSilent(SILENT_ACCOUNT_MINUTES);
+    if (silent.length === 0) return;
+
+    // Group silent accounts by tenant so each tenant is alerted via its own configs.
+    const byTenant = new Map();
+    for (const acc of silent) {
+      if (!byTenant.has(acc.tenant_id)) byTenant.set(acc.tenant_id, []);
+      byTenant.get(acc.tenant_id).push(acc);
+    }
+
+    for (const [tenantId, accounts] of byTenant) {
+      let alertConfigs;
+      try {
+        alertConfigs = await AlertConfigRepo.findByTenant(tenantId);
+      } catch (err) {
+        logger.error(`[AlertService] could not load alert configs for tenant ${tenantId}: ${err.message}`);
+        continue;
+      }
+      if (!alertConfigs || alertConfigs.length === 0) {
+        // No delivery channel configured — still surface it in the logs so an
+        // operator watching logs/metrics can see the account went silent.
+        for (const acc of accounts) {
+          logger.warn(`[AlertService] SILENT ACCOUNT ${acc.email} (tenant ${tenantId}) — no poll since ${acc.last_poll_at || 'never'} | lastError=${acc.last_error || '-'}`);
+        }
+        continue;
+      }
+
+      // Dedup per account within the silence window.
+      const toAlert = accounts.filter(acc => {
+        const last = this.lastSilentAlertTimes.get(acc.id);
+        if (!last) return true;
+        return (Date.now() - last) >= SILENT_ACCOUNT_MINUTES * 60_000;
+      });
+      if (toAlert.length === 0) continue;
+
+      // Record the dedup timestamp BEFORE delivery. Delivery can take up to
+      // ~90s per config (3 attempts × 30s backoff), while the AlertService
+      // ticks every 60s — writing the timestamp afterwards would let a second
+      // tick re-alert the same account before the first pass finished. Marking
+      // upfront makes the dedup window authoritative.
+      for (const acc of toAlert) {
+        this.lastSilentAlertTimes.set(acc.id, Date.now());
+        logger.warn(`[AlertService] SILENT ACCOUNT ${acc.email} (tenant ${tenantId}) — no poll since ${acc.last_poll_at || 'never'} | lastError=${acc.last_error || '-'}`);
+      }
+
+      for (const alert of alertConfigs) {
+        let sent = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await this._sendSilentAlert(alert, toAlert);
+            sent = true;
+            break;
+          } catch (err) {
+            logger.error(`[AlertService] silent-account delivery attempt ${attempt} failed: ${err.message}`);
+            if (attempt < 3) await new Promise(r => setTimeout(r, 30_000));
+          }
+        }
+        if (!sent) {
+          logger.error(`[AlertService] failed to deliver silent-account alert ${alert.id} after 3 attempts`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Delivers a silent-account alert through the same channels as stuck-event
+   * alerts. Shapes a distinct payload/message so operators can tell them apart.
+   */
+  async _sendSilentAlert(alert, accounts) {
+    const summary = accounts.map(a =>
+      `${a.email}${a.label ? ` (${a.label})` : ''} — sem coleta desde ${a.last_poll_at ? new Date(a.last_poll_at).toISOString() : 'sempre'}${a.last_error ? ` | erro: ${a.last_error}` : ''}`
+    );
+
+    if (alert.alert_type === 'WEBHOOK') {
+      const res = await fetch(alert.destination, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alert: 'accounts_silent',
+          threshold_min: SILENT_ACCOUNT_MINUTES,
+          count: accounts.length,
+          accounts: accounts.map(a => ({
+            id: a.id, email: a.email, label: a.label,
+            last_poll_at: a.last_poll_at, last_error: a.last_error,
+          })),
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`webhook responded HTTP ${res.status}`);
+    } else if (alert.alert_type === 'SLACK') {
+      const res = await fetch(alert.destination, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: `:rotating_light: *${accounts.length} conta(s) IMAP sem coletar email* há mais de ${SILENT_ACCOUNT_MINUTES}min:\n${summary.map(s => `• ${s}`).join('\n')}`,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`slack webhook responded HTTP ${res.status}`);
+    } else if (alert.alert_type === 'EMAIL') {
+      const { createTransport } = await import('nodemailer');
+      const transporter = createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT ?? 587),
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 15_000,
+      });
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM,
+        to: alert.destination,
+        subject: `[Alerta] ${accounts.length} conta(s) IMAP sem coletar email`,
+        text: `As seguintes contas não coletam email há mais de ${SILENT_ACCOUNT_MINUTES} minutos. Verifique conexão/credenciais:\n\n${summary.join('\n')}`,
+      });
     }
   }
 

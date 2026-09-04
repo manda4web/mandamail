@@ -8,6 +8,44 @@ import { runMigrations } from './db/migrate.js';
 import { loadEncryptionKey } from './crypto/passwords.js';
 import logger from './logger.js';
 
+// ---------------------------------------------------------------------------
+// Global crash guards — registered BEFORE anything else so they cover startup
+// too. This single process hosts every tenant's IMAP worker plus the retry,
+// alert and cleanup workers. Without these handlers, ONE stray promise
+// rejection anywhere would terminate the process and take down email
+// processing for ALL customers at once. That is the highest-impact failure
+// mode, so we neutralize it here.
+// ---------------------------------------------------------------------------
+
+// An unhandled rejection is almost always an isolated bug in one code path
+// (a missing await/.catch). It does NOT mean the whole process is corrupted,
+// so we log it loudly for observability and KEEP RUNNING — every other tenant
+// keeps processing email. The alternative (letting Node kill the process)
+// would punish all customers for one path's bug.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  logger.error(`[Process] UNHANDLED REJECTION (kept alive): ${msg}`);
+});
+
+// An uncaught exception leaves the process in an unknown state — the safe move
+// is to exit and let the process manager (Docker restart: unless-stopped)
+// bring us back clean. We attempt a best-effort graceful shutdown first so no
+// email is left half-processed, with a hard timeout so a wedged shutdown can't
+// hang the restart. _gracefulShutdown is assigned once main() wires it up.
+let _gracefulShutdown = null;
+process.on('uncaughtException', (err) => {
+  logger.fatal(`[Process] UNCAUGHT EXCEPTION: ${err.stack || err.message}`);
+  const forceExit = setTimeout(() => process.exit(1), 10_000);
+  forceExit.unref?.();
+  if (typeof _gracefulShutdown === 'function') {
+    Promise.resolve(_gracefulShutdown('uncaughtException'))
+      .catch(() => {})
+      .finally(() => process.exit(1));
+  } else {
+    process.exit(1);
+  }
+});
+
 async function main() {
   // 1. Validate critical environment variables
   try {
@@ -96,12 +134,27 @@ async function main() {
   cleanupWorker.start();
   logger.info('[Startup] CleanupWorker started');
 
+  // 9b. Start HeartbeatWorker (external dead-man's-switch). No-op unless
+  // HEARTBEAT_URL is set. Detects a total process/server outage that the
+  // in-process AlertService cannot report (it dies with the process).
+  const { HeartbeatWorker } = await import('./jobs/HeartbeatWorker.js');
+  const heartbeatWorker = new HeartbeatWorker();
+  heartbeatWorker.start();
+
   // 10. Log startup complete
   logger.info('=== Application startup complete — ready to accept requests ===');
 
   // Graceful shutdown — stops every background worker so no processing is
-  // killed mid-flight, with a hard timeout as a safety net.
+  // killed mid-flight, with a hard timeout as a safety net. Guarded so that a
+  // second signal (or a crash arriving during shutdown) can't run the teardown
+  // twice (double app.close()/stopAll would throw).
+  let _shuttingDown = false;
   const shutdown = async (signal) => {
+    if (_shuttingDown) {
+      logger.warn(`[Shutdown] already in progress, ignoring ${signal}`);
+      return;
+    }
+    _shuttingDown = true;
     logger.info(`[Shutdown] Received ${signal}, shutting down gracefully...`);
     const forceTimer = setTimeout(() => {
       logger.error('[Shutdown] timed out after 15s, forcing exit');
@@ -113,6 +166,7 @@ async function main() {
       alertService.stop();
       retryWorker.stop();
       cleanupWorker.stop();
+      heartbeatWorker.stop();
       await TenantScheduler.stopAll();
       await app.close();
       await endPool();
@@ -123,6 +177,10 @@ async function main() {
     clearTimeout(forceTimer);
     process.exit(0);
   };
+
+  // Expose the graceful shutdown to the top-level uncaughtException handler so
+  // a fatal crash still tries to stop workers cleanly before the restart.
+  _gracefulShutdown = shutdown;
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));

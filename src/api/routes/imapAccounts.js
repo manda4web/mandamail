@@ -35,6 +35,94 @@ export default async function imapAccountsRoutes(fastify) {
   });
 
   /**
+   * GET /tenants/:id/imap-accounts/health
+   * Fleet health view: for every account, cross the persisted signals
+   * (last_poll_at / last_error from the DB) with the in-memory worker state
+   * (running / stalled) and classify each account so an operator can see at a
+   * glance which ones stopped receiving email — WITHOUT waiting for a client
+   * to complain. This closes the loop on the original "email stopped, had to
+   * reconnect" problem by making the silent failure visible.
+   *
+   * Classification per account:
+   *  - paused   : account.active = false (intentionally off)
+   *  - stopped  : active but no worker in memory (plan inactive / not started)
+   *  - stalled  : worker exists but made no progress (watchdog will restart)
+   *  - silent   : last poll older than the silent threshold
+   *  - error    : last poll recent but last_error is set
+   *  - healthy  : polling recently, no error
+   */
+  fastify.get('/tenants/:id/imap-accounts/health', {
+    preHandler: [requireTenantAccess],
+  }, async (request, reply) => {
+    const { id: tenantId } = request.params;
+
+    const silentMinutes = Number(process.env.SILENT_ACCOUNT_MINUTES ?? 15);
+    const silentMs = silentMinutes * 60_000;
+
+    const accounts = await ImapAccountRepo.findHealthByTenant(tenantId);
+
+    const now = Date.now();
+    let healthy = 0, silent = 0, stalled = 0, stopped = 0, paused = 0, errored = 0;
+
+    const items = accounts.map((acc) => {
+      const lastPollMs = acc.last_poll_at ? now - new Date(acc.last_poll_at).getTime() : null;
+      const worker = TenantScheduler.getWorkerState(acc.id);
+
+      let state;
+      if (!acc.active) {
+        state = 'paused';
+        paused++;
+      } else if (!worker) {
+        // Active in DB but no live worker — plan gate or not yet (re)started.
+        state = 'stopped';
+        stopped++;
+      } else if (worker.stalled) {
+        state = 'stalled';
+        stalled++;
+      } else if (lastPollMs == null || lastPollMs > silentMs) {
+        state = 'silent';
+        silent++;
+      } else if (acc.last_error) {
+        state = 'error';
+        errored++;
+      } else {
+        state = 'healthy';
+        healthy++;
+      }
+
+      return {
+        id: acc.id,
+        email: acc.email,
+        label: acc.label,
+        active: acc.active,
+        poll_mode: acc.poll_mode,
+        poll_interval_sec: acc.poll_interval_sec,
+        last_poll_at: acc.last_poll_at,
+        seconds_since_last_poll: lastPollMs == null ? null : Math.round(lastPollMs / 1000),
+        last_error: acc.last_error,
+        worker_running: worker ? worker.running : false,
+        worker_stalled: worker ? worker.stalled : false,
+        state,
+      };
+    });
+
+    return reply.send({
+      tenant_id: tenantId,
+      silent_threshold_min: silentMinutes,
+      summary: {
+        total: items.length,
+        healthy,
+        silent,
+        stalled,
+        stopped,
+        paused,
+        error: errored,
+      },
+      accounts: items,
+    });
+  });
+
+  /**
    * POST /tenants/:id/imap-accounts
    * Create a new IMAP account. Enforces 50 account limit per tenant.
    * Inherits tenant mapping values on creation (Requirement 3).

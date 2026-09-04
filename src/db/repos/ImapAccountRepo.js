@@ -329,3 +329,49 @@ export async function countByTenant(tenantId) {
   );
   return rows[0].count;
 }
+
+/**
+ * Find active IMAP accounts that appear to have gone silent: their worker
+ * stopped updating last_poll_at for longer than the given threshold, OR it
+ * never polled since being (re)activated. Only accounts of active tenants are
+ * returned. This is the signal that an account stopped receiving email even
+ * though no email_events are being created (so the stuck-event alert is blind
+ * to it). Does NOT decrypt passwords — callers only need identity/observability.
+ * @param {number} staleMinutes - Minutes without a poll to consider silent
+ * @returns {Promise<Array>} Rows: id, tenant_id, email, label, last_poll_at, last_error
+ */
+export async function findSilent(staleMinutes) {
+  const { rows } = await db.query(
+    `SELECT ia.id, ia.tenant_id, ia.email, ia.label, ia.last_poll_at, ia.last_error
+       FROM imap_accounts ia
+       JOIN tenants t ON t.id = ia.tenant_id
+      WHERE ia.active = true
+        AND t.active = true
+        AND (
+          ia.last_poll_at IS NULL
+          OR ia.last_poll_at < NOW() - ($1 || ' minutes')::interval
+        )`,
+    [String(staleMinutes)]
+  );
+  return rows;
+}
+
+/**
+ * Return health/observability fields for ALL of a tenant's IMAP accounts,
+ * active or not (so an operator also sees disabled accounts). Never returns
+ * the password ciphertext — this feeds a read-only health view.
+ * @param {string} tenantId - Tenant UUID
+ * @returns {Promise<Array>} Rows: id, email, label, active, poll_mode,
+ *   poll_interval_sec, last_poll_at, last_error, created_at
+ */
+export async function findHealthByTenant(tenantId) {
+  const { rows } = await db.query(
+    `SELECT id, email, label, active, poll_mode, poll_interval_sec,
+            last_poll_at, last_error, created_at
+       FROM imap_accounts
+      WHERE tenant_id = $1
+      ORDER BY created_at ASC`,
+    [tenantId]
+  );
+  return rows;
+}
