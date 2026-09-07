@@ -319,6 +319,12 @@ export class ImapListener {
       const uidNext = Number(this.client.mailbox?.uidNext || 0);
       let cursor = await this._resolveCursor(uidValidity);
 
+      // Record the mailbox top so the stuck-cursor detector can compare it
+      // against last_seen_uid from the DB (no extra IMAP connection needed).
+      if (uidNext > 0) {
+        try { await ImapAccountRepo.updateUidNext(this.account.id, uidNext); } catch { /* observability only */ }
+      }
+
       // Process in FINITE UID windows instead of fetching `cursor+1:*` whole.
       // Two reasons:
       // (a) memory stays bounded per window (a big backlog used to be

@@ -18,6 +18,7 @@ const savedCursors = [];
 vi.mock('../../db/repos/ImapAccountRepo.js', () => ({
   updateLastPoll: vi.fn().mockResolvedValue(undefined),
   updateUidState: vi.fn(async (id, uidValidity, lastUid) => { savedCursors.push(lastUid); }),
+  updateUidNext: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../logger.js', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },

@@ -10,12 +10,19 @@ import logger from '../logger.js';
 // healthy cycle plus reconnection backoff, avoiding false positives.
 const SILENT_ACCOUNT_MINUTES = Number(process.env.SILENT_ACCOUNT_MINUTES ?? 15);
 
+// Stuck-cursor detector thresholds. An account is "stuck" when it is still
+// polling (alive) yet mail waits beyond the cursor and nothing is processed
+// for STUCK_CURSOR_MINUTES. Kept well above normal backlog-draining time so a
+// busy account isn't flagged mid-drain.
+const STUCK_CURSOR_MINUTES = Number(process.env.STUCK_CURSOR_MINUTES ?? 30);
+
 export class AlertService {
   constructor(checkIntervalSec = 60) {
     this.checkIntervalSec = checkIntervalSec;
     this.intervalId = null;
     this.lastAlertTimes = new Map(); // eventId:status -> timestamp
     this.lastSilentAlertTimes = new Map(); // accountId -> timestamp
+    this.lastStuckAlertTimes = new Map(); // accountId -> timestamp
   }
 
   start() {
@@ -54,6 +61,133 @@ export class AlertService {
       await this._checkSilentAccounts();
     } catch (err) {
       logger.error(`[AlertService] silent-account check error: ${err.message}`);
+    }
+
+    // Stuck-cursor detection: an account that is ALIVE (still polling) but not
+    // advancing despite mail waiting. This is invisible to both the stuck-event
+    // detector (no events are created) and the silent-account detector (the
+    // poll IS happening). It is exactly the failure that froze an account for
+    // 3 days before anyone noticed.
+    try {
+      await this._checkStuckCursors();
+    } catch (err) {
+      logger.error(`[AlertService] stuck-cursor check error: ${err.message}`);
+    }
+  }
+
+  /**
+   * Alerts when an active, still-polling account has a STUCK UID cursor: mail
+   * is waiting beyond the cursor but nothing is being processed. Reuses the
+   * tenant's alert_configs and dedups per account so it doesn't spam.
+   */
+  async _checkStuckCursors() {
+    const stuck = await ImapAccountRepo.findStuckCursor(STUCK_CURSOR_MINUTES);
+    if (stuck.length === 0) return;
+
+    const byTenant = new Map();
+    for (const acc of stuck) {
+      if (!byTenant.has(acc.tenant_id)) byTenant.set(acc.tenant_id, []);
+      byTenant.get(acc.tenant_id).push(acc);
+    }
+
+    for (const [tenantId, accounts] of byTenant) {
+      // Dedup per account within the stuck window.
+      const toAlert = accounts.filter(acc => {
+        const last = this.lastStuckAlertTimes.get(acc.id);
+        if (!last) return true;
+        return (Date.now() - last) >= STUCK_CURSOR_MINUTES * 60_000;
+      });
+      if (toAlert.length === 0) continue;
+
+      // Mark + log before delivery (same rationale as silent-account dedup).
+      for (const acc of toAlert) {
+        this.lastStuckAlertTimes.set(acc.id, Date.now());
+        const gap = Number(acc.last_uid_next) - Number(acc.last_seen_uid);
+        logger.error(`[AlertService] STUCK CURSOR ${acc.email} (tenant ${tenantId}) — cursor=${acc.last_seen_uid} uidNext=${acc.last_uid_next} (~${gap} emails aguardando) último evento=${acc.last_event_at || 'nunca'}`);
+      }
+
+      let alertConfigs;
+      try {
+        alertConfigs = await AlertConfigRepo.findByTenant(tenantId);
+      } catch (err) {
+        logger.error(`[AlertService] could not load alert configs for tenant ${tenantId}: ${err.message}`);
+        continue;
+      }
+      if (!alertConfigs || alertConfigs.length === 0) continue; // logged above
+
+      for (const alert of alertConfigs) {
+        let sent = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await this._sendStuckAlert(alert, toAlert);
+            sent = true;
+            break;
+          } catch (err) {
+            logger.error(`[AlertService] stuck-cursor delivery attempt ${attempt} failed: ${err.message}`);
+            if (attempt < 3) await new Promise(r => setTimeout(r, 30_000));
+          }
+        }
+        if (!sent) {
+          logger.error(`[AlertService] failed to deliver stuck-cursor alert ${alert.id} after 3 attempts`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Delivers a stuck-cursor alert through the tenant's channels. Distinct
+   * payload/message so operators can tell it apart from other alerts.
+   */
+  async _sendStuckAlert(alert, accounts) {
+    const summary = accounts.map(a => {
+      const gap = Number(a.last_uid_next) - Number(a.last_seen_uid);
+      return `${a.email}${a.label ? ` (${a.label})` : ''} — ~${gap} emails aguardando (cursor ${a.last_seen_uid} / topo ${a.last_uid_next}), último evento ${a.last_event_at ? new Date(a.last_event_at).toISOString() : 'nunca'}`;
+    });
+
+    if (alert.alert_type === 'WEBHOOK') {
+      const res = await fetch(alert.destination, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alert: 'cursor_stuck',
+          threshold_min: STUCK_CURSOR_MINUTES,
+          count: accounts.length,
+          accounts: accounts.map(a => ({
+            id: a.id, email: a.email, label: a.label,
+            last_seen_uid: a.last_seen_uid, last_uid_next: a.last_uid_next,
+            waiting: Number(a.last_uid_next) - Number(a.last_seen_uid),
+            last_event_at: a.last_event_at,
+          })),
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`webhook responded HTTP ${res.status}`);
+    } else if (alert.alert_type === 'SLACK') {
+      const res = await fetch(alert.destination, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: `:rotating_light: *${accounts.length} conta(s) IMAP com processamento travado* (coletando mas sem processar) há mais de ${STUCK_CURSOR_MINUTES}min:\n${summary.map(s => `• ${s}`).join('\n')}`,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`slack webhook responded HTTP ${res.status}`);
+    } else if (alert.alert_type === 'EMAIL') {
+      const { createTransport } = await import('nodemailer');
+      const transporter = createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT ?? 587),
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 15_000,
+      });
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM,
+        to: alert.destination,
+        subject: `[Alerta] ${accounts.length} conta(s) IMAP com processamento travado`,
+        text: `As seguintes contas estão coletando mas NÃO processando email há mais de ${STUCK_CURSOR_MINUTES} minutos (cursor travado). Verifique/reinicie o processamento:\n\n${summary.join('\n')}`,
+      });
     }
   }
 

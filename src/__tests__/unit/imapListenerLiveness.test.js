@@ -10,6 +10,7 @@ vi.mock('../../pipeline/EmailPipeline.js', () => ({
 vi.mock('../../db/repos/ImapAccountRepo.js', () => ({
   updateLastPoll: vi.fn().mockResolvedValue(undefined),
   updateUidState: vi.fn().mockResolvedValue(undefined),
+  updateUidNext: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../logger.js', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },

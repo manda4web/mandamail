@@ -318,6 +318,21 @@ export async function updateUidState(id, uidValidity, lastUid) {
 }
 
 /**
+ * Record the mailbox top (uidNext) observed on the latest poll. Feeds the
+ * stuck-cursor detector: comparing this against last_seen_uid reveals mail
+ * waiting to be processed without needing an extra IMAP connection.
+ * @param {string} id - IMAP account UUID
+ * @param {number} uidNext - Mailbox UIDNEXT value observed this poll
+ * @returns {Promise<void>}
+ */
+export async function updateUidNext(id, uidNext) {
+  await db.query(
+    'UPDATE imap_accounts SET last_uid_next = $1 WHERE id = $2',
+    [uidNext, id]
+  );
+}
+
+/**
  * Count active IMAP accounts for a tenant.
  * @param {string} tenantId - Tenant UUID
  * @returns {Promise<number>}
@@ -352,6 +367,52 @@ export async function findSilent(staleMinutes) {
           OR ia.last_poll_at < NOW() - ($1 || ' minutes')::interval
         )`,
     [String(staleMinutes)]
+  );
+  return rows;
+}
+
+/**
+ * Detect accounts with a STUCK UID cursor: the worker is alive and polling
+ * (last_poll_at recent) and the mailbox has messages waiting beyond the cursor
+ * (last_uid_next is ahead of last_seen_uid by more than `gapMargin`), yet no
+ * email_event has been created for that account in the last `staleMinutes` —
+ * i.e. mail is arriving but nothing is being processed. This is the exact
+ * signature of the bug that froze suporte.condominio for 3 days, and it does
+ * NOT fire on:
+ *   - a near-empty mailbox (uid_next ~= last_seen_uid + 1 → gap below margin),
+ *   - a dead/silent worker (that's covered by findSilent; here we REQUIRE a
+ *     recent poll so we only flag workers that are alive but not advancing),
+ *   - an account draining a large backlog right now (it would be creating
+ *     events, so the "no event in staleMinutes" condition fails).
+ *
+ * @param {number} staleMinutes - minutes without a new event to consider stuck
+ * @param {number} pollFreshMinutes - poll must be at least this recent (alive)
+ * @param {number} gapMargin - min (last_uid_next - last_seen_uid) to flag
+ * @returns {Promise<Array>} Rows: id, tenant_id, email, label, last_seen_uid,
+ *   last_uid_next, last_poll_at, last_event_at
+ */
+export async function findStuckCursor(staleMinutes = 30, pollFreshMinutes = 10, gapMargin = 3) {
+  const { rows } = await db.query(
+    `SELECT ia.id, ia.tenant_id, ia.email, ia.label,
+            ia.last_seen_uid, ia.last_uid_next, ia.last_poll_at,
+            (SELECT MAX(e.created_at) FROM email_events e WHERE e.imap_account_id = ia.id) AS last_event_at
+       FROM imap_accounts ia
+       JOIN tenants t ON t.id = ia.tenant_id
+      WHERE ia.active = true
+        AND t.active = true
+        AND ia.last_seen_uid IS NOT NULL
+        AND ia.last_uid_next IS NOT NULL
+        -- Worker is alive (polled recently) ...
+        AND ia.last_poll_at >= NOW() - ($2 || ' minutes')::interval
+        -- ... mail is waiting beyond the cursor (with margin) ...
+        AND ia.last_uid_next > ia.last_seen_uid + $3
+        -- ... but nothing has been processed for this account recently.
+        AND NOT EXISTS (
+          SELECT 1 FROM email_events e
+           WHERE e.imap_account_id = ia.id
+             AND e.created_at >= NOW() - ($1 || ' minutes')::interval
+        )`,
+    [String(staleMinutes), String(pollFreshMinutes), gapMargin]
   );
   return rows;
 }
