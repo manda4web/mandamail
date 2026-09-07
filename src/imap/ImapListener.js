@@ -313,6 +313,10 @@ export class ImapListener {
 
     try {
       const uidValidity = Number(this.client.mailbox?.uidValidity || 0);
+      // Highest UID that could exist in the mailbox. Used to know whether an
+      // empty window is the real end of the mailbox or just a GAP of deleted
+      // UIDs that we must skip over (see below).
+      const uidNext = Number(this.client.mailbox?.uidNext || 0);
       let cursor = await this._resolveCursor(uidValidity);
 
       // Process in FINITE UID windows instead of fetching `cursor+1:*` whole.
@@ -323,13 +327,26 @@ export class ImapListener {
       //     breaking out of the for-await wedges the connection (the pending
       //     FETCH never completes and every later command hangs until the
       //     socket timeout). A finite range always drains.
-      // A full window means there is probably more backlog: loop again. A
-      // finite UID range returns nothing when the start is beyond the last
-      // message, so the loop terminates naturally; msg.uid > cursor is kept
-      // as a defensive filter.
+      //
+      // IMPORTANT: UIDs are NOT dense. Deleted messages leave gaps. An empty
+      // window does NOT mean "no more mail" — it can be a run of deleted UIDs.
+      // If we stopped on the first empty window we would freeze forever
+      // whenever a gap is larger than WINDOW (exactly what happened: cursor
+      // stuck at 149872 while real mail sat at 150021+ behind a ~148-UID gap).
+      // So: only stop when the window is empty AND we've reached uidNext;
+      // otherwise advance the cursor past the gap and keep scanning.
       const WINDOW = 25;
+      // Safety cap: bound iterations per cycle so a huge sparse mailbox can't
+      // spin here indefinitely. Enough to scan a very large UID space in gaps
+      // of WINDOW; the next poll continues from the persisted cursor anyway.
+      const MAX_ITERS = 100000;
+      let iters = 0;
       let stop = false;
       while (!stop && this._alive()) {
+        if (++iters > MAX_ITERS) {
+          logger.warn(`[IMAP][${this.account.email}] fetchNew hit iteration cap (${MAX_ITERS}); continuing next poll from uid=${cursor}`);
+          break;
+        }
         const batch = [];
         for await (const msg of this.client.fetch(
           `${cursor + 1}:${cursor + WINDOW}`,
@@ -340,6 +357,24 @@ export class ImapListener {
         }
         batch.sort((a, b) => a.uid - b.uid);
         const fullWindow = batch.length >= WINDOW;
+
+        // GAP HANDLING: window returned nothing but there are still higher UIDs
+        // to reach (uidNext is beyond this window). Skip the deleted-UID gap by
+        // advancing the cursor a full window and scanning again — do NOT stop.
+        if (batch.length === 0) {
+          if (uidNext > 0 && (cursor + WINDOW) < (uidNext - 1)) {
+            cursor += WINDOW;
+            // Persist progress periodically (not every window) so crossing a
+            // large gap doesn't cause a storm of tiny DB writes, while a
+            // restart mid-scan still resumes near where it left off.
+            if (iters % 40 === 0) {
+              await this._saveCursor(uidValidity, cursor);
+            }
+            continue;
+          }
+          break; // truly reached the end of the mailbox
+        }
+
         if (fullWindow) {
           logger.info(`[IMAP][${this.account.email}] backlog: full window of ${WINDOW} msgs processed, fetching next`);
         }
@@ -408,7 +443,16 @@ export class ImapListener {
           }
         }
 
-        if (!fullWindow) break; // backlog exhausted
+        if (stop) break;
+        // Continue while there are still higher UIDs to reach. This covers a
+        // PARTIAL window (fewer than WINDOW msgs) that is followed by more mail
+        // after a gap — advance past the window we just processed and keep
+        // scanning instead of stopping early. We stop only when the cursor has
+        // reached the end of the mailbox (uidNext).
+        if (uidNext > 0 && (cursor + 1) < uidNext) {
+          continue;
+        }
+        break; // reached the end of the mailbox
       }
     } catch (err) {
       logger.error(`[IMAP][${this.account.email}] fetchNew error: ${err.message}`);
